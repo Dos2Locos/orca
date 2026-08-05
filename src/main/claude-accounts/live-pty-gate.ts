@@ -1,92 +1,33 @@
 import { randomUUID } from 'node:crypto'
-import { AsyncLocalStorage } from 'node:async_hooks'
 import * as ownershipEpoch from './live-pty-ownership-epoch'
+import {
+  getClaudeLivePtyPersistence,
+  injectedClaudeLaunchReservations,
+  liveClaudePtyIds,
+  liveInjectedClaudePtyAccounts,
+  liveSharedClaudePtyAccounts,
+  managedClaudeAccountMutationContext,
+  managedClaudeAccountMutations,
+  notifyDrainedOnTransition,
+  seededUnconfirmedInjectedPtyIds,
+  seededUnconfirmedPtyIds,
+  sharedClaudeLaunchReservations
+} from './live-pty-gate-registry'
 
-const liveClaudePtyIds = new Set<string>()
-const liveSharedClaudePtyAccounts = new Map<string, string | null>()
-const liveInjectedClaudePtyAccounts = new Map<string, string>()
-const injectedClaudeLaunchReservations = new Map<string, string>()
-const sharedClaudeLaunchReservations = new Map<string, string | null>()
-const managedClaudeAccountMutations = new Set<string>()
-const managedClaudeAccountMutationContext = new AsyncLocalStorage<ReadonlySet<string>>()
-// Why: ids restored from persistence at startup, not yet confirmed against the
-// daemon. They keep the OAuth refresh gate closed so an early managed refresh
-// cannot rotate the single-use refresh token out from under a Claude CLI that
-// survived the app restart inside the daemon.
-const seededUnconfirmedPtyIds = new Set<string>()
-const seededUnconfirmedInjectedPtyIds = new Set<string>()
+export type { ClaudeLivePtyPersistence } from './live-pty-gate-registry'
+export {
+  attachClaudeLivePtyPersistence,
+  onLiveClaudePtysDrained
+} from './live-pty-gate-registry'
+export {
+  confirmSeededClaudeLivePtys,
+  hasSeededUnconfirmedClaudePtys,
+  seedLiveClaudePtysFromPersistence,
+  seedLiveInjectedClaudePtysFromPersistence
+} from './live-pty-startup-seeding'
+
 let switchInProgress = false
 
-export type ClaudeLivePtyPersistence = {
-  addClaudeLivePtySessionId(sessionId: string, accountId?: string | null): void
-  removeClaudeLivePtySessionId(sessionId: string): void
-  addClaudeLivePtyAccountBinding?(sessionId: string, accountId: string): void
-  removeClaudeLivePtyAccountBinding?(sessionId: string): void
-}
-
-let persistence: ClaudeLivePtyPersistence | null = null
-
-export function attachClaudeLivePtyPersistence(target: ClaudeLivePtyPersistence | null): void {
-  persistence = target
-}
-
-export function seedLiveClaudePtysFromPersistence(
-  sessionIds: readonly string[],
-  bindings: readonly { sessionId: string; accountId: string | null }[] = []
-): void {
-  const accountBySessionId = new Map(
-    bindings.map((binding) => [binding.sessionId, binding.accountId])
-  )
-  for (const sessionId of sessionIds) {
-    liveClaudePtyIds.add(sessionId)
-    // Why: pre-binding releases have unknown ownership; block them
-    // conservatively instead of assuming the current global account.
-    liveSharedClaudePtyAccounts.set(sessionId, accountBySessionId.get(sessionId) ?? null)
-    ownershipEpoch.recordLiveClaudePtyOwnershipEpoch(sessionId)
-    seededUnconfirmedPtyIds.add(sessionId)
-  }
-}
-
-export function seedLiveInjectedClaudePtysFromPersistence(
-  bindings: readonly { sessionId: string; accountId: string }[]
-): void {
-  for (const { sessionId, accountId } of bindings) {
-    liveInjectedClaudePtyAccounts.set(sessionId, accountId)
-    ownershipEpoch.recordLiveClaudePtyOwnershipEpoch(sessionId)
-    seededUnconfirmedInjectedPtyIds.add(sessionId)
-  }
-}
-
-export function hasSeededUnconfirmedClaudePtys(): boolean {
-  return seededUnconfirmedPtyIds.size > 0 || seededUnconfirmedInjectedPtyIds.size > 0
-}
-
-/**
- * Reconcile seeded ids against the daemon's live session list. Seeded ids the
- * daemon no longer knows are dead — release them so they cannot defer OAuth
- * refresh forever. Seeded ids that are still alive stay in the gate even if
- * their pane never reattaches: that daemon process still owns the credentials.
- */
-export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]): void {
-  const alive = new Set(aliveSessionIds)
-  for (const sessionId of seededUnconfirmedPtyIds) {
-    if (!alive.has(sessionId)) {
-      liveClaudePtyIds.delete(sessionId)
-      liveSharedClaudePtyAccounts.delete(sessionId)
-      ownershipEpoch.clearLiveClaudePtyOwnershipEpoch(sessionId)
-      persistence?.removeClaudeLivePtySessionId(sessionId)
-    }
-  }
-  for (const sessionId of seededUnconfirmedInjectedPtyIds) {
-    if (!alive.has(sessionId)) {
-      liveInjectedClaudePtyAccounts.delete(sessionId)
-      ownershipEpoch.clearLiveClaudePtyOwnershipEpoch(sessionId)
-      persistence?.removeClaudeLivePtyAccountBinding?.(sessionId)
-    }
-  }
-  seededUnconfirmedPtyIds.clear()
-  seededUnconfirmedInjectedPtyIds.clear()
-}
 
 export function markClaudePtySpawned(
   ptyId: string,
@@ -111,7 +52,7 @@ export function markClaudePtySpawned(
     liveSharedClaudePtyAccounts.set(ptyId, bindingAccountId)
     try {
       if (!options?.persistenceAlreadyRecorded) {
-        persistence?.addClaudeLivePtySessionId(ptyId, bindingAccountId)
+        getClaudeLivePtyPersistence()?.addClaudeLivePtySessionId(ptyId, bindingAccountId)
       }
       seededUnconfirmedPtyIds.delete(ptyId)
       ownershipEpoch.recordLiveClaudePtyOwnershipEpoch(ptyId)
@@ -154,7 +95,7 @@ export function markInjectedClaudePtySpawned(
     liveInjectedClaudePtyAccounts.set(ptyId, accountId)
     try {
       if (!options?.persistenceAlreadyRecorded) {
-        persistence?.addClaudeLivePtyAccountBinding?.(ptyId, accountId)
+        getClaudeLivePtyPersistence()?.addClaudeLivePtyAccountBinding?.(ptyId, accountId)
       }
       seededUnconfirmedInjectedPtyIds.delete(ptyId)
       ownershipEpoch.recordLiveClaudePtyOwnershipEpoch(ptyId)
@@ -173,14 +114,16 @@ export function markInjectedClaudePtySpawned(
 }
 
 export function markClaudePtyExited(ptyId: string): void {
+  const hadLivePtys = liveClaudePtyIds.size > 0
   liveClaudePtyIds.delete(ptyId)
   liveSharedClaudePtyAccounts.delete(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
-  persistence?.removeClaudeLivePtySessionId(ptyId)
+  getClaudeLivePtyPersistence()?.removeClaudeLivePtySessionId(ptyId)
   liveInjectedClaudePtyAccounts.delete(ptyId)
   ownershipEpoch.clearLiveClaudePtyOwnershipEpoch(ptyId)
   seededUnconfirmedInjectedPtyIds.delete(ptyId)
-  persistence?.removeClaudeLivePtyAccountBinding?.(ptyId)
+  getClaudeLivePtyPersistence()?.removeClaudeLivePtyAccountBinding?.(ptyId)
+  notifyDrainedOnTransition(hadLivePtys)
 }
 
 export function hasLiveClaudePtys(): boolean {

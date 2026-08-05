@@ -18,6 +18,16 @@ Diagnostics:
 Agent Discovery:
   agent-context             Print the machine-readable command schema for agents
 
+Accounts:
+  account add               Add a managed Claude or Codex account on this Orca host
+  account list              List managed Claude and Codex accounts on this Orca host
+
+Skills:
+  skills list               List version-matched skill guides bundled with this Orca CLI
+  skills get                Print a version-matched skill guide as Markdown
+  skills install            Install bundled Orca skills globally via the community skills CLI
+  skills update             Update already-installed Orca skills via the community skills CLI
+
 Environments:
   environment add           Save a remote Orca runtime from a pairing code
   environment list          List saved remote Orca runtimes
@@ -78,11 +88,17 @@ Terminals:
   terminal split            Split an existing terminal pane
   terminal switch           Bring a terminal tab to the foreground
   terminal focus            Alias for terminal switch
-  terminal close            Close a terminal pane (or tab if last pane)
+  terminal close            Close a terminal pane/session, or its whole tab with --tab
 
 Orchestration:
+  orchestration run-create  Create and bind a lightweight orchestration Run
+  orchestration run-use     Bind this coordinator terminal to an existing Run
+  orchestration run-current Show this terminal's bound Run
+  orchestration run-list    List lightweight orchestration Runs
+  orchestration run-show    Show one lightweight orchestration Run
   orchestration send        Send an inter-agent message
-  orchestration check       Check messages for a terminal
+  orchestration check       Check the bound Run mailbox
+  orchestration ask         Ask the coordinator a blocking question
   orchestration reply       Reply to a message
   orchestration inbox       Show all messages across recipients
   orchestration task-create Create an orchestration task
@@ -90,8 +106,16 @@ Orchestration:
   orchestration task-update Update a task status
   orchestration dispatch    Dispatch a task to a terminal
   orchestration dispatch-show Show dispatch context for a task
-  orchestration run         Start the coordinator loop
-  orchestration run-stop    Stop the active coordinator run
+  orchestration worker-start Start a supervised worker locally or on a connected Orca server
+  orchestration worker-show Inspect one supervised worker
+  orchestration worker-read Read bounded output from one supervised worker
+  orchestration worker-stop Stop one supervised worker
+  orchestration worker-abandon Fence an uncertain worker without claiming it stopped
+  orchestration worker-release Release a settled worker's terminal after archiving its output
+  orchestration worker-retain Keep a worker terminal live for debugging
+  orchestration worker-list Report worker terminal resource accounting
+  orchestration coordinator-start Start the legacy automatic coordinator loop
+  orchestration coordinator-stop Stop the legacy automatic coordinator loop
   orchestration gate-create Create a decision gate blocking a task
   orchestration gate-resolve Resolve a pending decision gate
   orchestration gate-list   List decision gates
@@ -197,6 +221,8 @@ Common Commands:
   orca status [--json]
   orca diagnostics memory [--json]
   orca agent-context [--json]
+  orca account add [--agent claude|codex] [--json]
+  orca account list [--json]
   orca environment add --name <name> --pairing-code <code> [--json]
   orca environment list [--json]
   orca environment show --environment <selector> [--json]
@@ -211,7 +237,7 @@ Common Commands:
   orca file open <path> [--worktree <selector>] [--json]
   orca file diff <path> [--staged] [--worktree <selector>] [--json]
   orca file open-changed [--mode edit|diff|both] [--worktree <selector>] [--json]
-  orca terminal list [--worktree <selector>] [--limit <n>] [--json]
+  orca terminal list [--worktree <selector>] [--limit <n>] [--include-visual-layouts] [--json]
   orca terminal show [--terminal <handle>] [--json]
   orca terminal read [--terminal <handle>] [--cursor <n>] [--limit <n>] [--json]
   orca terminal send [--terminal <handle>] [--text <text>] [--enter] [--interrupt] [--json]
@@ -220,7 +246,7 @@ Common Commands:
   orca terminal create [--worktree <selector>] [--title <name>] [--command <text>] [--focus] [--json]
   orca terminal split [--terminal <handle>] [--direction horizontal|vertical] [--json]
   orca terminal switch [--terminal <handle>] [--json]
-  orca terminal close [--terminal <handle>] [--json]
+  orca terminal close [--terminal <handle>] [--tab] [--json]
   orca project list [--json]
   orca project setups [--project <id>] [--host <host-id>] [--json]
   orca project setup-existing-folder --project <id> --host <host-id> --path <path> [--kind git|folder] [--display-name <name>] [--json]
@@ -245,6 +271,9 @@ Terminal Send Options:
   --text <text>             Text to send to the terminal
   --enter                   Append Enter after sending text
   --interrupt               Send as an interrupt-style input when supported
+
+Terminal List Options:
+  --include-visual-layouts  Include tab and pane topology in JSON output
 
 Wait Options:
   --for exit                Wait until the target terminal exits
@@ -292,6 +321,7 @@ Browser Options:
   --page <id>               Stable browser page id (preferred for concurrent workflows)
   --profile <id>            Browser profile id
   --show-profile            Include the tab's browser profile in text output
+  --no-ua-spoof             Keep Electron's native user agent for a new profile
   --format <png|jpeg>       Screenshot image format
   --from <ref>              Drag source element ref
   --to <ref>                Drag target element ref
@@ -397,6 +427,12 @@ export function formatGroupHelp(specs: CommandSpec[], group: string): string {
 
 function formatCommandFlagHelp(flag: string, commandPath: string[]): string {
   const command = commandPath.join(' ')
+  if (command === 'skills install' && flag === 'agent') {
+    return '--agent <names>        Comma-separated install targets; default is detected agents'
+  }
+  if (command === 'terminal close' && flag === 'tab') {
+    return '--tab                  Close the whole tab and wait for durable persistence'
+  }
   if (command === 'linear issue' && flag === 'id') {
     return '--id <id>             Linear issue key, id, or URL'
   }
@@ -407,6 +443,18 @@ function formatCommandFlagHelp(flag: string, commandPath: string[]): string {
     return '--query <text>        Text to search across Linear issues'
   }
   if (command === 'linear search' && flag === 'workspace') {
+    return '--workspace <id|all>  Connected Linear workspace id, or all'
+  }
+  if (command === 'linear list-issues' && flag === 'cursor') {
+    return '--cursor <cursor>      Opaque cursor returned by a previous list-issues page'
+  }
+  if (command === 'orchestration worker-read' && flag === 'cursor') {
+    return '--cursor <cursor>      Opaque cursor returned by a previous worker-read page'
+  }
+  if (command === 'orchestration worker-list' && flag === 'terminal-state') {
+    return '--terminal-state <state> Terminal accounting filter: active, reclaimable, retained, release_pending, release_unknown, or released'
+  }
+  if (command === 'linear list-issues' && flag === 'workspace') {
     return '--workspace <id|all>  Connected Linear workspace id, or all'
   }
   if (command.startsWith('linear ') && flag === 'workspace') {
@@ -454,6 +502,11 @@ function formatCommandFlagHelp(flag: string, commandPath: string[]): string {
   if (command === 'orchestration task-create' && flag === 'display-name') {
     return '--display-name <text> UI label shown for dispatched worker rows'
   }
+  // Why: the shared --agent help describes launching a TUI agent in a terminal,
+  // which is the wrong meaning here — this selects the account provider.
+  if (command === 'account add' && flag === 'agent') {
+    return '--agent <id>           Account provider: claude or codex (default claude)'
+  }
   if (flag === 'key' && command === 'computer hotkey') {
     return '--key <key-combo>      Modifier chord with one key, e.g. CmdOrCtrl+A'
   }
@@ -486,6 +539,8 @@ export function formatFlagHelp(flag: string): string {
     'from-x': '--from-x <x>           Source window-local x coordinate',
     'from-y': '--from-y <y>           Source window-local y coordinate',
     help: '--help                 Show this help message',
+    'include-visual-layouts':
+      '--include-visual-layouts Include tab and pane topology in JSON output',
     interrupt: '--interrupt            Send as an interrupt-style input when supported',
     id: '--id <id>             Identifier for a target item or permission',
     issue: '--issue <number|null>  Linked GitHub issue number',
@@ -494,8 +549,11 @@ export function formatFlagHelp(flag: string): string {
     json: '--json                 Emit machine-readable JSON',
     key: '--key <key>            Key argument for this command',
     limit: '--limit <n>            Maximum number of rows to return',
+    local: '--local                Target the current project instead of the global install',
+    skill: '--skill <name>         Bundled skill to act on; repeat for several',
     mode: '--mode <mode>          Mode such as edit, diff, or both',
     'mouse-button': '--mouse-button <btn>   Mouse button: left, right, or middle',
+    modifiers: '--modifiers <chord>  Modifier keys held only for this click',
     name: '--name <name>          Name for the new worktree or automation',
     'no-parent': '--no-parent            Force no parent lineage for unrelated work',
     'no-screenshot': '--no-screenshot       Skip screenshot capture after the operation',
@@ -559,6 +617,7 @@ export function formatFlagHelp(flag: string): string {
     page: '--page <id>            Stable browser page id from `orca tab list --json`',
     profile: '--profile <id>        Browser profile id',
     'show-profile': '--show-profile        Include tab profile in text output',
+    'no-ua-spoof': "--no-ua-spoof         Keep Electron's native user agent",
     format: '--format <png|jpeg>    Screenshot image format'
   }
 
@@ -579,6 +638,9 @@ export function formatFlagHelp(flag: string): string {
   }
   if (flag === 'relations') {
     return '--relations            Include blocking, related, and duplicate links'
+  }
+  if (flag === 'activity') {
+    return '--activity             Include issue field-change history'
   }
   if (flag === 'full') {
     return '--full                 Include all supported V1 issue context within caps'

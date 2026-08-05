@@ -4,18 +4,29 @@
    without a meaningful boundary. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { gitExecFileAsyncMock, gitExecFileSyncMock, translateWslOutputPathsMock } = vi.hoisted(
-  () => ({
-    gitExecFileAsyncMock: vi.fn(),
-    gitExecFileSyncMock: vi.fn(),
-    translateWslOutputPathsMock: vi.fn((output: string) => output)
-  })
-)
+const {
+  gitExecFileAsyncMock,
+  gitExecFileSyncMock,
+  translateWslOutputPathsMock,
+  moveWorktreeDirectoryToTrashMock
+} = vi.hoisted(() => ({
+  gitExecFileAsyncMock: vi.fn(),
+  gitExecFileSyncMock: vi.fn(),
+  translateWslOutputPathsMock: vi.fn((output: string) => output),
+  moveWorktreeDirectoryToTrashMock: vi.fn()
+}))
 
 vi.mock('./runner', () => ({
   gitExecFileAsync: gitExecFileAsyncMock,
   gitExecFileSync: gitExecFileSyncMock,
   translateWslOutputPaths: translateWslOutputPathsMock
+}))
+
+// Default: the checkout cannot be renamed aside, so removal deletes it in place.
+vi.mock('../worktree-trash', () => ({
+  moveWorktreeDirectoryToTrash: moveWorktreeDirectoryToTrashMock.mockResolvedValue(undefined),
+  restoreWorktreeDirectoryFromTrash: vi.fn().mockResolvedValue(true),
+  scheduleWorktreeTrashDeletion: vi.fn()
 }))
 
 import { clearGitCapabilityStateForTests } from './git-capability-state'
@@ -30,7 +41,8 @@ import {
   moveWorktree,
   parseWorktreeList,
   removeWorktree,
-  WORKTREE_ADD_TIMEOUT_MS
+  WORKTREE_ADD_TIMEOUT_MS,
+  WORKTREE_LIST_TIMEOUT_MS
 } from './worktree'
 
 beforeEach(() => {
@@ -73,6 +85,21 @@ describe('listWorktrees in-flight sharing', () => {
     expect(gitExecFileAsyncMock).toHaveBeenCalledTimes(1)
   })
 
+  it('does not share scans across different timeout contracts', async () => {
+    const scanOutput = 'worktree /repo\nHEAD abc123\nbranch refs/heads/main\n'
+    gitExecFileAsyncMock.mockResolvedValue({ stdout: scanOutput })
+
+    await Promise.all([listWorktrees('/repo'), listWorktrees('/repo', { timeout: 5_000 })])
+
+    expect(gitExecFileAsyncMock.mock.calls).toEqual([
+      [
+        ['worktree', 'list', '--porcelain', '-z'],
+        { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }
+      ],
+      [['worktree', 'list', '--porcelain', '-z'], { cwd: '/repo', timeout: 5_000 }]
+    ])
+  })
+
   it('runs a fresh scan once the shared one has settled', async () => {
     const scanOutput = 'worktree /repo\nHEAD abc123\nbranch refs/heads/main\n'
     gitExecFileAsyncMock.mockResolvedValue({ stdout: scanOutput })
@@ -81,6 +108,27 @@ describe('listWorktrees in-flight sharing', () => {
     await listWorktrees('/repo')
 
     expect(gitExecFileAsyncMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs a fresh scan after a timed-out shared scan settles', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      gitExecFileAsyncMock
+        .mockRejectedValueOnce(new Error('git timed out.'))
+        .mockResolvedValueOnce({
+          stdout: 'worktree /repo\nHEAD abc123\nbranch refs/heads/main\n'
+        })
+
+      await expect(listWorktrees('/repo')).resolves.toEqual([])
+      await expect(listWorktrees('/repo')).resolves.toEqual([
+        expect.objectContaining({ path: '/repo', head: 'abc123' })
+      ])
+
+      expect(gitExecFileAsyncMock).toHaveBeenCalledTimes(2)
+      expect(_getWorktreeScanCacheSizesForTests()).toEqual({ inFlight: 0, generations: 0 })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('does not share scans across different repos', async () => {
@@ -270,6 +318,38 @@ describe('parseWorktreeList', () => {
     expect(parseWorktreeList(output, { nulDelimited: true })[1]).toMatchObject({
       locked: true,
       lockReason: '"literal\\nquote"'
+    })
+  })
+
+  it('preserves a prunable marker and its reason', () => {
+    expect(
+      parseWorktreeList(
+        'worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /stale\nHEAD def\nbranch refs/heads/feature\nprunable gitdir file points to non-existent location\n'
+      )[1]
+    ).toMatchObject({
+      path: '/stale',
+      prunable: true,
+      prunableReason: 'gitdir file points to non-existent location'
+    })
+  })
+
+  it('preserves a NUL-delimited prunable marker', () => {
+    const output = [
+      'worktree /repo',
+      'HEAD abc',
+      'branch refs/heads/main',
+      '',
+      'worktree /stale',
+      'HEAD def',
+      'branch refs/heads/feature',
+      'prunable gitdir file points to non-existent location',
+      ''
+    ].join('\0')
+
+    expect(parseWorktreeList(output, { nulDelimited: true })[1]).toMatchObject({
+      path: '/stale',
+      prunable: true,
+      prunableReason: 'gitdir file points to non-existent location'
     })
   })
 
@@ -519,7 +599,8 @@ branch refs/heads/feature/test
 
     expect(gitExecFileAsyncMock).toHaveBeenCalledTimes(1)
     expect(gitExecFileAsyncMock).toHaveBeenCalledWith(['worktree', 'list', '--porcelain', '-z'], {
-      cwd: '/repo'
+      cwd: '/repo',
+      timeout: WORKTREE_LIST_TIMEOUT_MS
     })
   })
 
@@ -555,13 +636,19 @@ branch refs/heads/main-2
         head: 'def456',
         branch: 'refs/heads/main-2',
         isBare: false,
-        isMainWorktree: false
+        isMainWorktree: false,
+        // The line-block fallback also probes linked worktree paths for
+        // existence (issue #8389), and this mocked path is absent on disk.
+        prunable: true
       }
     ])
 
     expect(gitExecFileAsyncMock.mock.calls).toEqual([
-      [['worktree', 'list', '--porcelain', '-z'], { cwd: '/repo' }],
-      [['worktree', 'list', '--porcelain'], { cwd: '/repo' }]
+      [
+        ['worktree', 'list', '--porcelain', '-z'],
+        { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }
+      ],
+      [['worktree', 'list', '--porcelain'], { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }]
     ])
   })
 
@@ -593,8 +680,11 @@ branch refs/heads/main
     ])
 
     expect(gitExecFileAsyncMock.mock.calls).toEqual([
-      [['worktree', 'list', '--porcelain', '-z'], { cwd: '/repo' }],
-      [['worktree', 'list', '--porcelain'], { cwd: '/repo' }]
+      [
+        ['worktree', 'list', '--porcelain', '-z'],
+        { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }
+      ],
+      [['worktree', 'list', '--porcelain'], { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }]
     ])
   })
 
@@ -611,7 +701,10 @@ branch refs/heads/main
     await expect(listWorktreeGraph('/repo')).resolves.toEqual([])
 
     expect(gitExecFileAsyncMock.mock.calls).toEqual([
-      [['worktree', 'list', '--porcelain', '-z'], { cwd: '/repo' }]
+      [
+        ['worktree', 'list', '--porcelain', '-z'],
+        { cwd: '/repo', timeout: WORKTREE_LIST_TIMEOUT_MS }
+      ]
     ])
   })
 
@@ -619,6 +712,20 @@ branch refs/heads/main
     gitExecFileAsyncMock.mockRejectedValueOnce(new Error('fatal: not a git repository'))
 
     await expect(listWorktreeGraph('/not-a-repo')).resolves.toEqual([])
+  })
+
+  it('lets callers override the default worktree list timeout', async () => {
+    gitExecFileAsyncMock.mockResolvedValueOnce({
+      stdout: 'worktree /repo\nHEAD abc123\nbranch refs/heads/main\n'
+    })
+
+    await listWorktreeGraph('/repo', { timeout: 5_000 })
+
+    expect(gitExecFileAsyncMock).toHaveBeenCalledWith(['worktree', 'list', '--porcelain', '-z'], {
+      cwd: '/repo',
+      timeout: 5_000
+    })
+    expect(WORKTREE_LIST_TIMEOUT_MS).toBe(30_000)
   })
 })
 
@@ -1696,6 +1803,7 @@ describe('removeWorktree', () => {
 
   it('uses safe `branch -d` and preserves a branch with unmerged commits', async () => {
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: beforeRemoval }) // list before
+    gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // clean probe before the rename attempt
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // worktree remove
     // Git refuses to delete an unmerged branch with `-d`.
     gitExecFileAsyncMock.mockRejectedValueOnce(new Error('not fully merged')) // branch -d
@@ -1712,6 +1820,7 @@ describe('removeWorktree', () => {
 
   it('deletes the branch when `branch -d` succeeds (fully merged)', async () => {
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: beforeRemoval }) // list before
+    gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // clean probe before the rename attempt
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // worktree remove
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // branch -d succeeds
 
@@ -1726,6 +1835,7 @@ describe('removeWorktree', () => {
   })
 
   it('reuses known removed worktree metadata instead of relisting before removal', async () => {
+    gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // clean probe before the rename attempt
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // worktree remove
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // branch -d succeeds
 
@@ -1737,6 +1847,7 @@ describe('removeWorktree', () => {
     })
 
     expect(gitExecFileAsyncMock.mock.calls.map((call) => call[0])).toEqual([
+      ['status', '--porcelain', '--untracked-files=all'],
       ['worktree', 'remove', '/repo-feature'],
       ['branch', '-d', '--', 'feature/test']
     ])
@@ -1744,6 +1855,7 @@ describe('removeWorktree', () => {
 
   it('prunes and retries branch deletion only when Git reports a checked-out branch', async () => {
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: beforeRemoval }) // list before
+    gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // clean probe before the rename attempt
     gitExecFileAsyncMock.mockResolvedValueOnce({ stdout: '' }) // worktree remove
     gitExecFileAsyncMock.mockRejectedValueOnce(
       new Error("error: cannot delete branch 'feature/test' used by worktree at '/repo-stale'")
@@ -1755,6 +1867,7 @@ describe('removeWorktree', () => {
 
     expect(gitExecFileAsyncMock.mock.calls.map((call) => call[0])).toEqual([
       ['worktree', 'list', '--porcelain', '-z'],
+      ['status', '--porcelain', '--untracked-files=all'],
       ['worktree', 'remove', '/repo-feature'],
       ['branch', '-d', '--', 'feature/test'],
       ['worktree', 'prune'],

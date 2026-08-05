@@ -4,7 +4,11 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AI_VAULT_AGENTS } from '../../shared/ai-vault-types'
 import { scanAiVaultSessions } from './session-scanner'
-import { isolatedScanRoots, jsonLines } from './session-scanner-test-fixtures'
+import {
+  isolatedScanRoots,
+  jsonLines,
+  writeAntigravityScannerFixture
+} from './session-scanner-test-fixtures'
 
 let tempRoots: string[] = []
 
@@ -150,7 +154,9 @@ describe('scanAiVaultSessions', () => {
 
     const result = await scanAiVaultSessions({
       ...roots,
-      platform: 'darwin'
+      platform: 'darwin',
+      limit: 1,
+      unlimited: true
     })
 
     expect(result.issues).toEqual([])
@@ -170,6 +176,8 @@ describe('scanAiVaultSessions', () => {
       totalTokens: 155,
       resumeCommand: "cd '/repo/app' && claude --resume 'claude-session'"
     })
+    // Why: list scans omit firstUserPrompt so the vault payload stays bounded.
+    expect(claude?.firstUserPrompt).toBeUndefined()
 
     const codex = result.sessions.find((session) => session.agent === 'codex')
     expect(codex).toMatchObject({
@@ -181,6 +189,7 @@ describe('scanAiVaultSessions', () => {
       totalTokens: 625,
       resumeCommand: `cd '/repo/app/packages/web' && CODEX_HOME='${root}' codex resume '019f0000-1111-7222-8333-444444444444'`
     })
+    expect(codex?.firstUserPrompt).toBeUndefined()
   })
 
   it('indexes Codex sessions from Orca runtime homes with resumable commands', async () => {
@@ -422,6 +431,9 @@ describe('scanAiVaultSessions', () => {
         ]
       })
     )
+
+    const antigravitySessionId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await writeAntigravityScannerFixture(roots.antigravityBrainDir, antigravitySessionId)
 
     await mkdir(roots.copilotSessionsDir, { recursive: true })
     await writeFile(
@@ -718,11 +730,7 @@ describe('scanAiVaultSessions', () => {
       ])
     )
 
-    const result = await scanAiVaultSessions({
-      ...roots,
-      platform: 'darwin',
-      limit: 20
-    })
+    const result = await scanAiVaultSessions({ ...roots, platform: 'darwin', limit: 20 })
 
     expect(result.issues).toEqual([])
     expect(new Set(result.sessions.map((session) => session.agent))).toEqual(
@@ -739,6 +747,7 @@ describe('scanAiVaultSessions', () => {
       `cd '/tmp/codex' && CODEX_HOME='${root}' codex resume 'codex-session'`
     )
     expect(commandByAgent.get('gemini')).toBe("gemini --resume 'gemini-session'")
+    expect(commandByAgent.get('antigravity')).toBe(`agy --conversation '${antigravitySessionId}'`)
     expect(commandByAgent.get('copilot')).toBe(
       "cd '/tmp/copilot' && copilot --resume='copilot-session'"
     )

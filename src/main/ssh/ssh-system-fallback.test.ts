@@ -24,7 +24,6 @@ vi.mock('child_process', () => ({
 
 import {
   buildSshArgs,
-  findSystemSsh,
   downloadFileViaSystemSsh,
   spawnSystemSsh,
   spawnSystemSshCommand,
@@ -81,6 +80,16 @@ function expectNoOrcaControlMasterArgs(args: string[]): void {
   expect(args).not.toContain('ControlMaster=auto')
   expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(false)
   expect(args).not.toContain('ControlPersist=300')
+}
+
+function expectOrcaControlMasterArgs(args: string[]): void {
+  if (process.platform === 'win32') {
+    expectNoOrcaControlMasterArgs(args)
+    return
+  }
+  expect(args).toContain('ControlMaster=auto')
+  expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(true)
+  expect(args).toContain('ControlPersist=300')
 }
 
 type EventedProcess = EventEmitter & {
@@ -141,22 +150,6 @@ function createMockChildProcess(): EventEmitter & {
   })
   return child
 }
-
-describe('findSystemSsh', () => {
-  beforeEach(() => {
-    existsSyncMock.mockReset()
-  })
-
-  it('returns the first existing ssh path', () => {
-    mockSystemSshExists()
-    expect(findSystemSsh()).toBe(SYSTEM_SSH_PATH)
-  })
-
-  it('returns null when no ssh binary is found', () => {
-    existsSyncMock.mockReturnValue(false)
-    expect(findSystemSsh()).toBeNull()
-  })
-})
 
 describe('spawnSystemSsh', () => {
   let mockProc: {
@@ -266,7 +259,8 @@ describe('spawnSystemSsh', () => {
       })
     )
 
-    expect(args).toContain('deploy@fdpass-host')
+    expect(args).toContain('fdpass-host')
+    expect(args).not.toContain('deploy@fdpass-host')
     expect(args).not.toContain('resolved.example.com')
     expect(args).not.toContain('-p')
     expect(args).not.toContain('-i')
@@ -291,6 +285,53 @@ describe('spawnSystemSsh', () => {
     expect(args).toContain('deploy@127.0.0.1')
   })
 
+  it('requests GSSAPI authentication explicitly for manual targets', () => {
+    const args = buildSshArgs(
+      createTarget({ source: 'manual', configHost: 'krb.example.com', gssapiAuthentication: true })
+    )
+
+    expect(args).toContain('GSSAPIAuthentication=yes')
+  })
+
+  it('restricts Kerberos probes to non-interactive GSSAPI authentication', () => {
+    spawnSystemSshCommand(
+      createTarget({
+        configHost: 'krb-host; touch /tmp/not-run',
+        source: 'ssh-config',
+        gssapiAuthentication: true
+      }),
+      'echo ready',
+      { gssapiOnly: true, wrapCommand: false }
+    )
+
+    const args = spawnMock.mock.calls[0][1] as string[]
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'GSSAPIAuthentication=yes',
+        '-o',
+        'PreferredAuthentications=gssapi-with-mic'
+      ])
+    )
+    expect(args).not.toContain('BatchMode=no')
+    const standaloneControlIdx = args.indexOf('-S')
+    expect(standaloneControlIdx).toBeGreaterThan(-1)
+    expect(args[standaloneControlIdx + 1]).toBe('none')
+    expect(args.at(-2)).toBe('krb-host; touch /tmp/not-run')
+    expect(args.at(-1)).toBe('echo ready')
+  })
+
+  it('leaves GSSAPI to the Host block for ssh-config targets', () => {
+    const args = buildSshArgs(
+      createTarget({ configHost: 'krb-host', source: 'ssh-config', gssapiAuthentication: true })
+    )
+
+    expect(args).not.toContain('GSSAPIAuthentication=yes')
+    expect(args).toContain('krb-host')
+  })
+
   it('does not inject Orca ControlMaster flags when ssh config already owns muxing', () => {
     const args = buildSshArgs(createTarget({ configHost: 'workbox', source: 'ssh-config' }), {
       resolvedConfig: createResolvedConfig({
@@ -302,7 +343,7 @@ describe('spawnSystemSsh', () => {
 
     expectNoOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
-    expect(args).toContain('deploy@workbox')
+    expect(args).toContain('workbox')
   })
 
   it('injects Orca ControlMaster flags when ssh config only sets ControlPersist', () => {
@@ -313,9 +354,7 @@ describe('spawnSystemSsh', () => {
       })
     })
 
-    expect(args).toContain('ControlMaster=auto')
-    expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(true)
-    expect(args).toContain('ControlPersist=300')
+    expectOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
   })
 
@@ -327,9 +366,7 @@ describe('spawnSystemSsh', () => {
       })
     })
 
-    expect(args).toContain('ControlMaster=auto')
-    expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(true)
-    expect(args).toContain('ControlPersist=300')
+    expectOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
   })
 
@@ -340,9 +377,7 @@ describe('spawnSystemSsh', () => {
       })
     })
 
-    expect(args).toContain('ControlMaster=auto')
-    expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(true)
-    expect(args).toContain('ControlPersist=300')
+    expectOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
   })
 
@@ -351,7 +386,7 @@ describe('spawnSystemSsh', () => {
 
     expectNoOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
-    expect(args).toContain('deploy@workbox')
+    expect(args).toContain('workbox')
   })
 
   it('does not inject Orca ControlMaster flags for unresolved legacy config aliases', () => {
@@ -359,7 +394,7 @@ describe('spawnSystemSsh', () => {
 
     expectNoOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
-    expect(args).toContain('deploy@workbox')
+    expect(args).toContain('workbox')
   })
 
   it('can inject Orca ControlMaster flags for ssh-config targets with resolved config', () => {
@@ -367,9 +402,7 @@ describe('spawnSystemSsh', () => {
       resolvedConfig: createResolvedConfig()
     })
 
-    expect(args).toContain('ControlMaster=auto')
-    expect(args.some((arg) => arg.startsWith('ControlPath='))).toBe(true)
-    expect(args).toContain('ControlPersist=300')
+    expectOrcaControlMasterArgs(args)
     expect(args).not.toContain('-S')
   })
 
@@ -385,18 +418,28 @@ describe('spawnSystemSsh', () => {
   it('adds keepalive options to Orca-owned ControlMaster connections', () => {
     const args = buildSshArgs(createTarget(), { resolvedConfig: createResolvedConfig() })
 
-    expect(args).toContain('ControlMaster=auto')
-    expect(args).toContain('ControlPersist=300')
-    expect(args).toContain('ServerAliveInterval=15')
-    expect(args).toContain('ServerAliveCountMax=3')
+    expectOrcaControlMasterArgs(args)
+    if (process.platform !== 'win32') {
+      expect(args).toContain('ServerAliveInterval=15')
+      expect(args).toContain('ServerAliveCountMax=3')
+    }
   })
 
   it('spawns a remote command through the system ssh target', () => {
     spawnSystemSshCommand(createTarget({ configHost: 'fdpass-host' }), 'echo hello')
 
+    // Why: the remote command stays on one line so csh/tcsh login shells cannot
+    // split it before /bin/sh receives it.
+    const args = spawnMock.mock.calls[0][1] as string[]
+    expect(args).toContain('--')
+    expect(args).toContain('fdpass-host')
+    const wrapped = args.at(-1)!
+    expect(wrapped).not.toContain('\n')
+    expect(wrapped).toContain('printf %b "$@"')
+    expect(wrapped).not.toContain('base64')
     expect(spawnMock).toHaveBeenCalledWith(
       SYSTEM_SSH_PATH,
-      expect.arrayContaining(['--', 'deploy@fdpass-host', "exec /bin/sh -c 'echo hello'"]),
+      expect.any(Array),
       expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
     )
   })
@@ -423,7 +466,7 @@ describe('spawnSystemSsh', () => {
     expect(standaloneControlIdx).toBe(-1)
     expectNoOrcaControlMasterArgs(args)
     expect(args).toContain('127.0.0.1:5173:127.0.0.1:3000')
-    expect(args[terminatorIdx + 1]).toBe('deploy@fdpass-host')
+    expect(args[terminatorIdx + 1]).toBe('fdpass-host')
     expect(spawnMock).toHaveBeenCalledWith(
       SYSTEM_SSH_PATH,
       expect.any(Array),
@@ -438,7 +481,7 @@ describe('spawnSystemSsh', () => {
 
     expect(spawnMock).toHaveBeenCalledWith(
       SYSTEM_SSH_PATH,
-      expect.arrayContaining(['--', 'deploy@fdpass-host', 'echo hello']),
+      expect.arrayContaining(['--', 'fdpass-host', 'echo hello']),
       expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] })
     )
   })
@@ -449,6 +492,15 @@ describe('spawnSystemSsh', () => {
     channel.stdin.end('contents')
 
     expect(mockProc.stdin.end).toHaveBeenCalledWith('contents')
+  })
+
+  it('marks a system command channel when local teardown is requested', () => {
+    const channel = spawnSystemSshCommand(createTarget(), 'npm install')
+
+    channel.close()
+
+    expect(channel._closeRequested).toBe(true)
+    expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
   })
 
   it('removes wrapped process listeners after command close', () => {
@@ -758,6 +810,7 @@ describe('spawnSystemSsh', () => {
 
   it('throws when no system ssh is found', () => {
     existsSyncMock.mockReturnValue(false)
+    vi.stubEnv('PATH', '')
     expect(() => spawnSystemSsh(createTarget())).toThrow('No system ssh binary found')
   })
 

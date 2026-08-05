@@ -180,8 +180,12 @@ export const CORE_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['terminal', 'list'],
     summary: 'List live Orca-managed terminals',
-    usage: 'orca terminal list [--worktree <selector>] [--limit <n>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'worktree', 'limit']
+    usage:
+      'orca terminal list [--worktree <selector>] [--limit <n>] [--include-visual-layouts] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'worktree', 'limit', 'include-visual-layouts'],
+    notes: [
+      'JSON omits visualLayouts by default; pass --include-visual-layouts when machine-readable tab and pane topology is required.'
+    ]
   },
   {
     path: ['terminal', 'show'],
@@ -254,10 +258,16 @@ export const CORE_COMMAND_SPECS: CommandSpec[] = [
   },
   {
     path: ['terminal', 'close'],
-    summary: 'Close a terminal tab (kills PTY if running)',
-    usage: 'orca terminal close [--terminal <handle>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'terminal'],
-    examples: ['orca terminal close --terminal term_abc123']
+    summary: 'Close a terminal pane/session, or its whole tab with --tab',
+    usage: 'orca terminal close [--terminal <handle>] [--tab] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'tab'],
+    notes: [
+      'Without --tab, preserves the existing pane/session close behavior. With --tab, waits until the whole tab is durably removed.'
+    ],
+    examples: [
+      'orca terminal close --terminal term_abc123',
+      'orca terminal close --terminal term_abc123 --tab --json'
+    ]
   },
   {
     path: ['terminal', 'rename'],

@@ -1,21 +1,56 @@
 // @vitest-environment happy-dom
 
-import React from 'react'
-import { act } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import NewWorkspaceComposerCard from './NewWorkspaceComposerCard'
+import React, { act } from 'react'
+import type { Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NewWorkspaceProjectOption } from '@/lib/new-workspace-project-options'
-import type { ClaudeManagedAccountSummary } from '../../../shared/types'
+import {
+  changeInputValue,
+  claudeAccounts,
+  devboxNeedsSetupHostOption,
+  disconnectedBastionNeedsSetupHostOption,
+  disconnectedDevboxNeedsSetupHostOption,
+  findConnectButton,
+  findInputByLabel,
+  findRunTargetItem,
+  localReadyHostOption,
+  openRunTargetPicker,
+  renderCard,
+  sourceRepos
+} from './new-workspace-composer-card.test.harness'
+
+const storeMocks = vi.hoisted(() => ({
+  closeModal: vi.fn(),
+  openModal: vi.fn(),
+  openSettingsPage: vi.fn(),
+  openSettingsTarget: vi.fn(),
+  setRuntimeEnvironmentStatus: vi.fn()
+}))
+
+const apiMocks = vi.hoisted(() => ({
+  runtimeGetStatus: vi.fn(),
+  sshConnect: vi.fn()
+}))
 
 vi.mock('@/store', () => ({
-  useAppStore: (selector: (state: unknown) => unknown) =>
-    selector({
-      openModal: vi.fn(),
-      activeModal: null,
-      settings: { defaultTuiAgent: null, disabledTuiAgents: [] },
-      updateSettings: vi.fn()
-    })
+  useAppStore: Object.assign(
+    (selector: (state: unknown) => unknown) =>
+      selector({
+        closeModal: storeMocks.closeModal,
+        openModal: storeMocks.openModal,
+        openSettingsPage: storeMocks.openSettingsPage,
+        openSettingsTarget: storeMocks.openSettingsTarget,
+        setRuntimeEnvironmentStatus: storeMocks.setRuntimeEnvironmentStatus,
+        activeModal: 'none',
+        settings: { defaultTuiAgent: null, disabledTuiAgents: [] },
+        updateSettings: vi.fn()
+      }),
+    {
+      getState: () => ({
+        setRuntimeEnvironmentStatus: storeMocks.setRuntimeEnvironmentStatus
+      })
+    }
+  )
 }))
 
 vi.mock('@/components/contextual-tours/use-contextual-tour', () => ({
@@ -30,6 +65,13 @@ vi.mock('@/components/ui/tooltip', () => ({
 
 vi.mock('@/components/agent/AgentCombobox', () => ({
   default: () => <button type="button">Agent picker</button>
+}))
+
+// Stub the host-add dialog to its `mode` — the composer's job is to open it with the right
+// mode; the dialog's own SSH/runtime IPC has separate coverage.
+vi.mock('@/components/sidebar/AddRemoteHostDialog', () => ({
+  AddRemoteHostDialog: ({ mode }: { mode: 'ssh' | 'server' | null }) =>
+    mode ? <div data-testid="add-remote-host-dialog" data-mode={mode} /> : null
 }))
 
 vi.mock('@/components/sparse/SparseCheckoutPresetSelect', () => ({
@@ -78,139 +120,39 @@ vi.mock('@/components/new-workspace/ProjectCombobox', () => ({
   )
 }))
 
-const projectOptions: NewWorkspaceProjectOption[] = [
-  {
-    kind: 'project-group',
-    id: 'project-group:platform',
-    projectGroupId: 'platform',
-    displayName: 'Platform',
-    badgeColor: 'var(--muted-foreground)',
-    detail: '/workspace/platform',
-    parentPath: '/workspace/platform',
-    connectionId: null
-  }
-]
-
-const sourceRepos = [
-  {
-    id: 'repo-a',
-    displayName: 'Repo A',
-    path: '/repo-a',
-    badgeColor: '#111111'
-  },
-  {
-    id: 'repo-b',
-    displayName: 'Repo B',
-    path: '/repo-b',
-    badgeColor: '#222222'
-  }
-]
-
-function renderCard(
-  overrides: Partial<React.ComponentProps<typeof NewWorkspaceComposerCard>> = {}
-) {
-  const container = document.createElement('div')
-  document.body.appendChild(container)
-  const root = createRoot(container)
-  act(() => {
-    root.render(
-      <NewWorkspaceComposerCard
-        quickAgent={null}
-        onQuickAgentChange={() => {}}
-        claudeAccounts={[]}
-        claudeAccountId={null}
-        onClaudeAccountIdChange={() => {}}
-        eligibleRepos={[]}
-        repoId="repo-a"
-        projectOptions={projectOptions}
-        selectedProjectId="project-group:platform"
-        selectedRepoIsGit
-        onRepoChange={() => {}}
-        onProjectChange={() => {}}
-        primaryActionLabel="Create workspace"
-        name=""
-        onNameValueChange={() => {}}
-        onSmartGitHubItemSelect={() => {}}
-        onSmartGitLabItemSelect={() => {}}
-        onSmartBranchSelect={() => {}}
-        onSmartLinearIssueSelect={() => {}}
-        smartNameSelection={null}
-        onClearSmartNameSelection={() => {}}
-        canReuseSelectedBranch={false}
-        reuseSelectedBranch={false}
-        onReuseSelectedBranchChange={() => {}}
-        branchNameOverride=""
-        onBranchNameOverrideChange={() => {}}
-        forkPushWarning={null}
-        detectedAgentIds={null}
-        onOpenAgentSettings={() => {}}
-        advancedOpen={false}
-        onToggleAdvanced={() => {}}
-        createDisabled={false}
-        projectError={null}
-        creating={false}
-        onCreate={() => {}}
-        note=""
-        onNoteChange={() => {}}
-        setupConfig={null}
-        requiresExplicitSetupChoice={false}
-        setupDecision={null}
-        onSetupDecisionChange={() => {}}
-        setupAgentStartupPolicy="start-immediately"
-        onSetupAgentStartupPolicyChange={() => {}}
-        shouldWaitForSetupCheck={false}
-        resolvedSetupDecision={null}
-        createError={null}
-        selectedRepoConnectionId={null}
-        selectedRepoSshStatus={null}
-        selectedRepoRequiresConnection={false}
-        selectedRepoConnectInProgress={false}
-        onConnectSelectedRepo={async () => {}}
-        canUseSparseCheckout={false}
-        sparsePresets={[]}
-        sparseSelectedPresetId={null}
-        onSparseSelectPreset={() => {}}
-        branchesEnabled={false}
-        setupControlsEnabled={false}
-        sparseControlsEnabled={false}
-        {...overrides}
-      />
-    )
-  })
-  return { container, root }
-}
-
-function findInputByLabel(container: HTMLElement, labelText: string): HTMLInputElement | null {
-  const label = [...container.querySelectorAll('label')].find(
-    (candidate) => candidate.textContent?.trim() === labelText
-  )
-  const labelledId = label?.getAttribute('for')
-  if (labelledId) {
-    return document.getElementById(labelledId) as HTMLInputElement | null
-  }
-  return label?.parentElement?.querySelector<HTMLInputElement>('input') ?? null
-}
-
-function changeInputValue(input: HTMLInputElement, value: string): void {
-  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-  act(() => {
-    valueSetter?.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
-const claudeAccounts = [
-  { id: 'acct-alice', email: 'alice@example.com' },
-  { id: 'acct-bob', email: 'bob@example.com' }
-] as unknown as ClaudeManagedAccountSummary[]
-
 let current: { container: HTMLDivElement; root: Root } | null = null
 
 describe('NewWorkspaceComposerCard folder task source mode', () => {
+  beforeEach(() => {
+    ;(window as unknown as { api: unknown }).api = {
+      runtimeEnvironments: {
+        getStatus: apiMocks.runtimeGetStatus
+      },
+      ssh: {
+        connect: apiMocks.sshConnect
+      }
+    }
+    apiMocks.runtimeGetStatus.mockResolvedValue({
+      id: 'status',
+      ok: true,
+      result: {
+        runtimeId: 'runtime-devbox',
+        rendererGraphEpoch: 1,
+        graphStatus: 'ready',
+        authoritativeWindowId: null,
+        liveTabCount: 0,
+        liveLeafCount: 0
+      },
+      _meta: { runtimeId: 'runtime-devbox' }
+    })
+    apiMocks.sshConnect.mockResolvedValue(undefined)
+  })
+
   afterEach(() => {
     act(() => current?.root.unmount())
     current?.container.remove()
     current = null
+    vi.clearAllMocks()
   })
 
   it('passes folder child repos into the create-from field without a source trigger', () => {
@@ -329,11 +271,12 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
     )
   })
 
-  it('emits the setup startup policy toggle value', () => {
+  it('emits the setup startup policy toggle value when setup will run', () => {
     const changes: string[] = []
     current = renderCard({
       advancedOpen: true,
       setupControlsEnabled: true,
+      resolvedSetupDecision: 'run',
       setupConfig: {
         source: 'yaml',
         command: 'pnpm install',
@@ -342,12 +285,36 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
       onSetupAgentStartupPolicyChange: (next) => changes.push(next)
     })
 
-    const waitSwitch = current.container.querySelector<HTMLElement>(
+    const waitSwitch = current.container.querySelector<HTMLButtonElement>(
       '[role="switch"][aria-label="Wait for setup to complete before starting agent"]'
     )
     expect(waitSwitch).toBeTruthy()
+    expect(waitSwitch?.disabled).toBe(false)
     act(() => waitSwitch?.click())
     expect(changes).toEqual(['wait-for-setup'])
+  })
+
+  it('disables the wait-for-setup toggle when setup is set to skip', () => {
+    const changes: string[] = []
+    current = renderCard({
+      advancedOpen: true,
+      setupControlsEnabled: true,
+      resolvedSetupDecision: 'skip',
+      setupConfig: {
+        source: 'yaml',
+        command: 'pnpm install',
+        kind: 'setup'
+      },
+      onSetupAgentStartupPolicyChange: (next) => changes.push(next)
+    })
+
+    const waitSwitch = current.container.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="Wait for setup to complete before starting agent"]'
+    )
+    expect(waitSwitch?.disabled).toBe(true)
+    // Nothing to wait for when setup won't run — clicking is inert.
+    act(() => waitSwitch?.click())
+    expect(changes).toEqual([])
   })
 
   it('shows a git-only branch name field in Advanced and emits manual edits', () => {
@@ -429,6 +396,184 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
     ).toBe('false')
   })
 
+  it('shows setup-needed hosts in the run target picker when one setup is ready', () => {
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, devboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    expect(current.container.textContent).toContain('Run on')
+    openRunTargetPicker(current.container)
+
+    const devboxItem = findRunTargetItem('Devbox')
+    expect(devboxItem?.textContent).toContain('Project location not set')
+    // Not-connected rows stay highlightable (never `disabled`) so they hover like
+    // the other rows; they're quieted visually instead.
+    expect(devboxItem?.hasAttribute('data-disabled')).toBe(false)
+    expect(devboxItem?.getAttribute('role')).toBe('option')
+  })
+
+  it('shows the run target picker for one ready setup so hosts can be added', () => {
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    expect(current.container.textContent).toContain('Run on')
+    openRunTargetPicker(current.container)
+    expect(findRunTargetItem('Add host')).toBeTruthy()
+  })
+
+  it('does not select setup-needed run target rows', () => {
+    const hostChanges: string[] = []
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, devboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local',
+      onProjectHostSetupChange: (setupId) => hostChanges.push(setupId)
+    })
+
+    openRunTargetPicker(current.container)
+    const devboxItem = findRunTargetItem('Devbox')
+    expect(devboxItem).toBeTruthy()
+    act(() => devboxItem?.click())
+
+    expect(hostChanges).toEqual([])
+  })
+
+  it('connects disconnected setup-needed SSH hosts without selecting them', async () => {
+    const hostChanges: string[] = []
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, disconnectedDevboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local',
+      onProjectHostSetupChange: (setupId) => hostChanges.push(setupId)
+    })
+
+    openRunTargetPicker(current.container)
+    const devboxItem = findRunTargetItem('Devbox')
+    expect(devboxItem).toBeTruthy()
+    const connectButton = [...(devboxItem?.querySelectorAll('button') ?? [])].find((button) =>
+      button.textContent?.includes('Connect')
+    )
+    expect(connectButton).toBeTruthy()
+
+    await act(async () => {
+      connectButton?.click()
+    })
+
+    expect(apiMocks.sshConnect).toHaveBeenCalledWith({ targetId: 'devbox' })
+    expect(hostChanges).toEqual([])
+    // The picker stays open so the connecting state is visible; the row is not auto-selected.
+    expect(findRunTargetItem('Devbox')).toBeTruthy()
+  })
+
+  it('keeps other hosts connectable while one connect is still in flight', async () => {
+    // First host's connect never resolves — a stalled connect must not disable the others.
+    apiMocks.sshConnect.mockImplementation(({ targetId }: { targetId: string }) =>
+      targetId === 'devbox' ? new Promise(() => {}) : Promise.resolve(undefined)
+    )
+    current = renderCard({
+      projectHostSetupOptions: [
+        localReadyHostOption,
+        disconnectedDevboxNeedsSetupHostOption,
+        disconnectedBastionNeedsSetupHostOption
+      ],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    openRunTargetPicker(current.container)
+    await act(async () => {
+      findConnectButton('Devbox')?.click()
+    })
+
+    // The picker stays open through the connect, so the state is inspectable in place.
+    // Devbox is mid-connect: disabled, showing the connecting indicator; Bastion stays clickable.
+    const devboxButton = findConnectButton('Devbox')
+    expect(devboxButton?.disabled).toBe(true)
+    expect(devboxButton?.textContent).toContain('Connecting')
+    const bastionButton = findConnectButton('Bastion')
+    expect(bastionButton?.disabled).toBe(false)
+    expect(bastionButton?.textContent).toContain('Connect')
+
+    await act(async () => {
+      bastionButton?.click()
+    })
+    expect(apiMocks.sshConnect).toHaveBeenCalledWith({ targetId: 'bastion' })
+  })
+
+  it('stops the connecting indicator when the connect fails', async () => {
+    // A failed connect must clear the spinner and restore the Connect button so the user
+    // can retry — the row can't stay stuck on "Connecting" after the error.
+    apiMocks.sshConnect.mockRejectedValue(new Error('connection refused'))
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, disconnectedDevboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    openRunTargetPicker(current.container)
+    await act(async () => {
+      findConnectButton('Devbox')?.click()
+    })
+
+    const devboxButton = findConnectButton('Devbox')
+    expect(devboxButton?.disabled).toBe(false)
+    expect(devboxButton?.textContent).toContain('Connect')
+    expect(devboxButton?.textContent).not.toContain('Connecting')
+  })
+
+  it('opens the SSH host add dialog over the composer without leaving for Settings', () => {
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, devboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    openRunTargetPicker(current.container)
+    act(() => findRunTargetItem('Add host')?.click())
+    act(() => findRunTargetItem('Add SSH host')?.click())
+
+    const dialog = document.body.querySelector('[data-testid="add-remote-host-dialog"]')
+    expect(dialog?.getAttribute('data-mode')).toBe('ssh')
+    // The composer stays put — no navigation that would discard the in-progress form.
+    expect(storeMocks.closeModal).not.toHaveBeenCalled()
+    expect(storeMocks.openSettingsPage).not.toHaveBeenCalled()
+    expect(storeMocks.openSettingsTarget).not.toHaveBeenCalled()
+  })
+
+  it('opens the add-host submenu on hover without a click', () => {
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, devboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    openRunTargetPicker(current.container)
+    const addHost = findRunTargetItem('Add host')
+    expect(addHost).toBeTruthy()
+    // Hovering the row (no click) opens its submenu so it feels like a menu.
+    // Hover arms rows via mousemove, matching the project picker.
+    act(() => {
+      addHost?.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }))
+    })
+
+    expect(findRunTargetItem('Add SSH host')).toBeTruthy()
+    expect(findRunTargetItem('Add Remote Orca Server')).toBeTruthy()
+  })
+
+  it('opens the remote Orca server add dialog over the composer without leaving for Settings', () => {
+    current = renderCard({
+      projectHostSetupOptions: [localReadyHostOption, devboxNeedsSetupHostOption],
+      selectedProjectHostSetupId: 'setup-local'
+    })
+
+    openRunTargetPicker(current.container)
+    act(() => findRunTargetItem('Add host')?.click())
+    act(() => findRunTargetItem('Add Remote Orca Server')?.click())
+
+    const dialog = document.body.querySelector('[data-testid="add-remote-host-dialog"]')
+    expect(dialog?.getAttribute('data-mode')).toBe('server')
+    expect(storeMocks.closeModal).not.toHaveBeenCalled()
+    expect(storeMocks.openSettingsPage).not.toHaveBeenCalled()
+    expect(storeMocks.openSettingsTarget).not.toHaveBeenCalled()
+  })
+
   it('shows VM recipes inside the run target picker', () => {
     const hostChanges: string[] = []
     const recipeChanges: (string | null)[] = []
@@ -464,10 +609,7 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
     expect(current.container.textContent).toContain('Run on')
     expect(current.container.textContent).not.toContain('VM recipe')
 
-    const runTargetButton =
-      current.container.querySelector<HTMLButtonElement>('button[role="combobox"]')
-    expect(runTargetButton).toBeTruthy()
-    act(() => runTargetButton?.click())
+    openRunTargetPicker(current.container)
 
     expect(document.body.textContent).toContain('Per-Workspace Environment')
     const ephemeralVmItem = [
@@ -476,7 +618,7 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
     expect(ephemeralVmItem).toBeTruthy()
     act(() => ephemeralVmItem?.click())
 
-    const recipeItem = [...document.body.querySelectorAll<HTMLElement>('[cmdk-item]')].find(
+    const recipeItem = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find(
       (item) => item.textContent?.includes('Vercel Sandbox')
     )
     expect(recipeItem).toBeTruthy()
@@ -518,12 +660,13 @@ describe('NewWorkspaceComposerCard folder task source mode', () => {
       onEphemeralVmRecipeChange: (recipeId) => recipeChanges.push(recipeId)
     })
 
-    const runTargetButton =
-      current.container.querySelector<HTMLButtonElement>('button[role="combobox"]')
-    expect(runTargetButton?.textContent).toContain('Per-Workspace Environment')
-    act(() => runTargetButton?.click())
+    const runTargetShell = current.container.querySelector<HTMLElement>(
+      'div[data-run-target-combobox-root="true"]'
+    )
+    expect(runTargetShell?.textContent).toContain('Per-Workspace Environment')
+    openRunTargetPicker(current.container)
 
-    const builderItem = [...document.body.querySelectorAll<HTMLElement>('[cmdk-item]')].find(
+    const builderItem = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find(
       (item) => item.textContent?.includes('Builder')
     )
     expect(builderItem).toBeTruthy()

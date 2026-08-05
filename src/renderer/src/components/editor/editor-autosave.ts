@@ -87,9 +87,20 @@ export function canAutoSaveOpenFile(file: OpenFile): boolean {
 // baseline is still unverified (the conflict may simply not be marked YET).
 // One predicate so the save-queue gate and the timer scheduler cannot drift.
 export function isAutosaveSuspendedForFile(
-  file: Pick<OpenFile, 'externalMutation' | 'pendingDiskBaselineVerification'>
+  file: Pick<
+    OpenFile,
+    | 'externalMutation'
+    | 'pendingDiskBaselineVerification'
+    | 'pendingLiveDiskVerification'
+    | 'pendingOwnerMigration'
+  >
 ): boolean {
-  return file.externalMutation === 'changed' || file.pendingDiskBaselineVerification === true
+  return (
+    file.externalMutation === 'changed' ||
+    file.pendingDiskBaselineVerification === true ||
+    file.pendingLiveDiskVerification === true ||
+    file.pendingOwnerMigration === true
+  )
 }
 
 export function normalizeAutoSaveDelayMs(value: unknown): number {

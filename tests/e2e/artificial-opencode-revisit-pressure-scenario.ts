@@ -17,6 +17,7 @@ import {
   waitForActivePanePtyId,
   waitForActiveTerminalManager
 } from './helpers/terminal'
+import { waitForTerminalPtyVisible } from './artificial-opencode-pane-interactions'
 
 type RevisitPressurePane = { paneKey: string; ptyId: string }
 
@@ -90,6 +91,7 @@ export async function runRendererBackpressureRevisitScenario<
   deps,
   maxMedianKeyLatencyMs,
   maxRendererSchedulerQueuedChars,
+  maxRevisitLatencyMs,
   maxTimerDriftMs,
   maxWorstKeyLatencyMs,
   mainRendererPressureTargetChars,
@@ -102,6 +104,7 @@ export async function runRendererBackpressureRevisitScenario<
   deps: RevisitPressureDeps<TMeasurement, TDebug, TScheduler, TMainPressure, TAckGate>
   maxMedianKeyLatencyMs: number
   maxRendererSchedulerQueuedChars: number
+  maxRevisitLatencyMs: number
   maxTimerDriftMs: number
   maxWorstKeyLatencyMs: number
   mainRendererPressureTargetChars: number
@@ -159,6 +162,7 @@ export async function runRendererBackpressureRevisitScenario<
     await switchToWorktree(orcaPage, secondWorktreeId)
     await ensureTerminalVisible(orcaPage)
     await waitForActiveTerminalManager(orcaPage, 30_000)
+    await waitForTerminalPtyVisible(orcaPage, typingPtyId)
     const measurement = await deps.measureTypingDuringLoad(
       orcaPage,
       typingScriptPath,
@@ -196,6 +200,8 @@ export async function runRendererBackpressureRevisitScenario<
     await switchToWorktree(orcaPage, firstWorktreeId)
     await ensureTerminalVisible(orcaPage)
     await waitForActiveTerminalManager(orcaPage, 30_000)
+    // Why: hidden PaneManagers persist, so manager readiness alone can race the reveal commit.
+    await waitForTerminalPtyVisible(orcaPage, revisitPane.ptyId)
     await deps.focusPane(orcaPage, revisitPane.paneKey)
     await sendToTerminal(orcaPage, revisitPane.ptyId, `printf '\\n${revisitMarker}\\n'\r`)
     const revisitLatencyMs = await waitForMarkerLatency(orcaPage, revisitMarker, 10_000)
@@ -205,7 +211,10 @@ export async function runRendererBackpressureRevisitScenario<
         1
       )}ms heldAckChars=${ackGate?.heldAckChars ?? 0}`
     })
-    expect(revisitLatencyMs).toBeLessThan(maxWorstKeyLatencyMs)
+    // Why: this printf is measured after a worktree switch/focus while the
+    // background panes are still ACK-gate-held, so it gets its own under-load
+    // bound rather than the unloaded worst-key budget.
+    expect(revisitLatencyMs).toBeLessThan(maxRevisitLatencyMs)
 
     await deps.releaseTerminalAckGate(orcaPage)
     await deps.focusPane(orcaPage, loadPanes[0]?.paneKey ?? revisitPane.paneKey)

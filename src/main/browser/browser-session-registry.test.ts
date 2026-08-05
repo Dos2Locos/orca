@@ -21,7 +21,9 @@ vi.mock('electron', () => ({
 vi.mock('./browser-manager', () => ({
   browserManager: {
     notifyPermissionDenied: vi.fn(),
-    handleGuestWillDownload: vi.fn()
+    handleGuestWillDownload: vi.fn(),
+    installCertificateRequestGuard: vi.fn(),
+    removeCertificateRequestGuard: vi.fn()
   }
 }))
 
@@ -80,6 +82,13 @@ describe('BrowserSessionRegistry', () => {
 
   it('rejects creating a profile with scope default', () => {
     const profile = browserSessionRegistry.createProfile('default', 'Sneaky')
+    expect(profile).toBeNull()
+  })
+
+  it('rejects invalid user-agent modes at the registry boundary', () => {
+    const profile = browserSessionRegistry.createProfile('isolated', 'Invalid UA', {
+      userAgentMode: 'rotating' as never
+    })
     expect(profile).toBeNull()
   })
 
@@ -195,6 +204,25 @@ describe('BrowserSessionRegistry', () => {
     browserSessionRegistry.hydrateFromPersisted([fakeProfile])
     expect(browserSessionRegistry.getProfile('00000000-0000-0000-0000-000000000001')).not.toBeNull()
     expect(browserSessionRegistry.isAllowedPartition(fakeProfile.partition)).toBe(true)
+  })
+
+  it('rejects a persisted profile whose partition belongs to a different profile id', () => {
+    const profileId = '00000000-0000-4000-8000-000000000021'
+    const claimedPartition = 'persist:orca-browser-session-00000000-0000-4000-8000-000000000022'
+
+    browserSessionRegistry.hydrateFromPersisted([
+      {
+        id: profileId,
+        scope: 'isolated',
+        partition: claimedPartition,
+        label: 'Conflicting identity',
+        source: null,
+        userAgentMode: 'native'
+      }
+    ])
+
+    expect(browserSessionRegistry.getProfile(profileId)).toBeNull()
+    expect(browserSessionRegistry.isAllowedPartition(claimedPartition)).toBe(false)
   })
 
   it('sets up session policies for new partitions', () => {

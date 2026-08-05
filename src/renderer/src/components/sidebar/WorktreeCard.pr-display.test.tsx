@@ -60,7 +60,7 @@ vi.mock('@/components/ui/tooltip', () => ({
 }))
 
 vi.mock('./use-worktree-activity-status', () => ({
-  useWorktreeActivityStatus: () => 'active'
+  useWorktreeActivityStatus: () => 'inactive'
 }))
 
 vi.mock('./CacheTimer', () => ({
@@ -70,10 +70,6 @@ vi.mock('./CacheTimer', () => ({
 
 vi.mock('./WorktreeCardAgents', () => ({
   default: () => null
-}))
-
-vi.mock('./SshDisconnectedDialog', () => ({
-  SshDisconnectedDialog: () => null
 }))
 
 vi.mock('./WorktreeContextMenu', () => ({
@@ -175,8 +171,8 @@ describe('WorktreeCard linked PR display', () => {
       <WorktreeCard worktree={makeWorktree({ linkedPR: 456 })} repo={makeRepo()} isActive={false} />
     )
 
-    expect(markup).toContain('Active')
-    expect(markup).toContain('bg-emerald-500')
+    expect(markup).toContain('Inactive')
+    expect(markup).toContain('bg-neutral-500/40')
     expect(markup).not.toContain('PR: Open')
     expect(markup).not.toContain('Linked PR #456')
   }, 20_000)
@@ -265,6 +261,12 @@ describe('WorktreeCard linked PR display', () => {
         linkedReviewHintKey: 'github:456'
       }
     }
+    prCache = {
+      'repo-1::feature/local-branch': {
+        data: makePRInfo({ number: 456, title: 'Stale branch PR' }),
+        fetchedAt: Date.now()
+      }
+    }
     const { default: WorktreeCard } = await import('./WorktreeCard')
 
     const markup = renderWorktreeCardMarkup(
@@ -285,7 +287,14 @@ describe('WorktreeCard linked PR display', () => {
       'local::repo-1::feature/local-branch': {
         data: makeHostedReview({ number: 456, title: 'Branch PR', state: 'open' }),
         fetchedAt: Date.now(),
-        linkedReviewHintKey: ''
+        linkedReviewHintKey: 'github:456',
+        branchLookupGitHubPRNumber: 456
+      }
+    }
+    prCache = {
+      'repo-1::feature/local-branch': {
+        data: makePRInfo({ number: 456, title: 'Branch PR' }),
+        fetchedAt: Date.now()
       }
     }
     const { default: WorktreeCard } = await import('./WorktreeCard')
