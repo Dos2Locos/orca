@@ -119,6 +119,7 @@ describe('TerminalHost', () => {
 
       const result = await host.createOrAttach({
         sessionId: 'session-1',
+        attachOnly: true,
         cols: 80,
         rows: 24,
         streamClient: { onData: vi.fn(), onExit: vi.fn() }

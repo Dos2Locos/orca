@@ -35,7 +35,8 @@ import type {
   WorktreeLineage,
   WorkspaceLineage,
   WorkspaceSessionPatch,
-  WorkspaceSessionState
+  WorkspaceSessionState,
+  ClaudeRateLimitAccountsState
 } from '../../../shared/types'
 import type { SkillDiscoveryResult } from '../../../shared/skills'
 import type { SkillFreshnessInventory } from '../../../shared/skill-freshness'
@@ -71,6 +72,10 @@ import {
   type ExecutionHostId
 } from '../../../shared/execution-host'
 import { toRuntimeWorktreeSelector } from '../runtime/runtime-worktree-selector'
+import {
+  hasClaudeAccountPinUpdate,
+  runLegacyWorktreeMetaUpdates
+} from '../runtime/runtime-worktree-meta-fallback'
 import { callAbortableRuntimeEnvironment } from '../runtime/abortable-runtime-environment-call'
 import { normalizeDisabledTuiAgents } from '../../../shared/tui-agent-selection'
 import {
@@ -816,7 +821,7 @@ function createWebPreloadApi(): Partial<PreloadApi> {
     minimaxCredentials: createMiniMaxCredentialsApi(),
     grokAccounts: createGrokAccountsApi(),
     codexAccounts: createAccountsApi(),
-    claudeAccounts: createAccountsApi(),
+    claudeAccounts: createClaudeAccountsApi(),
     cli: createCliApi(),
     agentHooks: createAgentHooksApi(),
     macosTccPrompts: createMacosTccPromptsApi(),
@@ -1734,6 +1739,7 @@ function createWorktreesApi(): NonNullable<Partial<PreloadApi>['worktrees']> {
           : {}),
         parentWorkspace: args.parentWorkspace,
         workspaceStatus: args.workspaceStatus,
+        claudeAccountId: args.claudeAccountId,
         manualOrder: args.manualOrder,
         automationProvenanceRequest: args.automationProvenanceRequest
       })
@@ -1798,6 +1804,32 @@ function createWorktreesApi(): NonNullable<Partial<PreloadApi>['worktrees']> {
         ...rpcUpdates
       })
       return withRuntimeWorktreeOwner(owned.result.worktree, owned.hostId)
+    },
+    updateMetaBatch: async ({ updates }) => {
+      const runtimeUpdates = updates.map(({ worktreeId, updates: worktreeUpdates }) => ({
+        worktree: toRuntimeWorktreeSelector(worktreeId),
+        ...(Object.prototype.hasOwnProperty.call(worktreeUpdates, 'pushTarget') &&
+        worktreeUpdates.pushTarget === undefined
+          ? { ...worktreeUpdates, pushTarget: null }
+          : worktreeUpdates)
+      }))
+      const response = await callRuntimeEnvelope<{ updated: number }>('worktree.setBatch', {
+        updates: runtimeUpdates
+      })
+      if (response.ok) {
+        return
+      }
+      if (response.error.code !== 'method_not_found') {
+        throw new Error(response.error.message)
+      }
+      if (runtimeUpdates.some(hasClaudeAccountPinUpdate)) {
+        throw new Error('Assigning Claude accounts requires a newer Orca host.')
+      }
+      // Why: paired clients can outpace their host during rolling upgrades;
+      // older hosts still support the pre-batch per-worktree method.
+      await runLegacyWorktreeMetaUpdates(runtimeUpdates, (runtimeUpdate) =>
+        callRuntimeResult('worktree.set', runtimeUpdate)
+      )
     },
     listLineage: async () =>
       await callRuntimeResult<{
@@ -3075,6 +3107,14 @@ function createAccountsApi(): never {
     // client has no recorded lane to offer and every pane falls to derivation.
     listRecordedPaneLanes: () => Promise.resolve({}),
     forgetStalePanes: () => Promise.resolve()
+  } as never
+}
+
+function createClaudeAccountsApi(): never {
+  return {
+    ...(createAccountsApi() as NonNullable<Partial<PreloadApi>['claudeAccounts']>),
+    list: async () =>
+      (await callRuntimeResult<{ claude: ClaudeRateLimitAccountsState }>('accounts.list')).claude
   } as never
 }
 

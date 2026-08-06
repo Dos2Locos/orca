@@ -195,9 +195,14 @@ export type WorktreeSlice = {
     linkedGiteaPR?: number | null,
     compareBaseRef?: string,
     options?: {
+      // Why: reserved for automation-dispatch flows so host-side provenance can
+      // be minted securely; regular create callers should omit this.
       automationProvenanceRequest?: CreateWorktreeArgs['automationProvenanceRequest']
       linkedWorkItem?: WorkspaceLinkedItem | null
       linkedTaskSourceContext?: TaskSourceContext | null
+      /** Claude managed account to pin the new worktree to. Omitted/null =
+       *  inherit the global host selection. */
+      claudeAccountId?: CreateWorktreeArgs['claudeAccountId']
     }
   ) => Promise<CreateWorktreeResult>
   /** Register an in-flight background creation and make it the active surface. */

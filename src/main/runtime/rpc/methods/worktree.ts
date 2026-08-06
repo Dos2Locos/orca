@@ -20,6 +20,7 @@ import {
   WorktreeResolvePrBase,
   WorktreeSelector,
   WorktreeSet,
+  WorktreeSetBatch,
   WorktreeSortOrder,
   WorktreeTeardownMissingTerminalsParams
 } from './worktree-schemas'
@@ -133,6 +134,7 @@ export const WORKTREE_METHODS: RpcMethod[] = [
             displayName: params.displayName,
             telemetrySource: params.telemetrySource,
             workspaceStatus: params.workspaceStatus,
+            claudeAccountId: params.claudeAccountId,
             manualOrder: params.manualOrder,
             sparseCheckout: params.sparseCheckout,
             pushTarget: params.pushTarget,
@@ -224,6 +226,7 @@ export const WORKTREE_METHODS: RpcMethod[] = [
         sparsePresetId: params.sparsePresetId,
         baseRef: params.baseRef,
         workspaceStatus: params.workspaceStatus,
+        claudeAccountId: params.claudeAccountId,
         pushTarget: params.pushTarget,
         diffComments: params.diffComments,
         mobileDiffReview: params.mobileDiffReview,
@@ -236,6 +239,17 @@ export const WORKTREE_METHODS: RpcMethod[] = [
             : undefined
       } as Parameters<typeof runtime.updateManagedWorktreeMeta>[1])
     })
+  }),
+  defineMethod({
+    name: 'worktree.setBatch',
+    params: WorktreeSetBatch,
+    handler: async (params, { runtime }) =>
+      runtime.updateManagedWorktreesMeta(
+        params.updates.map(({ worktree, ...updates }) => ({
+          worktreeSelector: worktree,
+          updates
+        })) as Parameters<typeof runtime.updateManagedWorktreesMeta>[0]
+      )
   }),
   defineMethod({
     name: 'worktree.persistSortOrder',

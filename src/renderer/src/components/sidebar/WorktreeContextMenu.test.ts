@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canAssignClaudeAccountsToWorktrees,
   isContextWorktreeDeletable,
   shouldUseNativeContextMenu,
   shouldIgnoreNestedWorktreeContextMenuScope,
@@ -14,8 +15,24 @@ import {
   selectMenuScopedMap,
   shouldRevealWorktreeDeveloperMenu
 } from './WorktreeContextMenu'
-import type { Worktree, WorktreeLineage, WorkspaceStatusDefinition } from '../../../../shared/types'
+import type {
+  Repo,
+  Worktree,
+  WorktreeLineage,
+  WorkspaceStatusDefinition
+} from '../../../../shared/types'
 
+describe('Claude account assignment ownership', () => {
+  const repo = { id: 'repo-1', executionHostId: 'local' } as Repo
+  const worktree = { id: 'repo-1::/workspace', repoId: 'repo-1' } as Worktree
+
+  it('keeps account discovery and assignment out of paired web menus', () => {
+    const repos = new Map([[repo.id, repo]])
+
+    expect(canAssignClaudeAccountsToWorktrees([worktree], repos, false)).toBe(true)
+    expect(canAssignClaudeAccountsToWorktrees([worktree], repos, true)).toBe(false)
+  })
+})
 describe('shouldRevealWorktreeDeveloperMenu', () => {
   it('stays hidden for an ordinary right-click', () => {
     expect(

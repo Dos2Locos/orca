@@ -71,7 +71,9 @@ import type {
   TerminalLayoutSnapshot,
   TerminalTab,
   WorkspaceSessionPatch,
-  WorkspaceSessionState
+  WorkspaceSessionState,
+  ClaudeLivePtyAccountBinding,
+  ClaudeLiveSharedPtyAccountBinding
 } from '../shared/types'
 import {
   deriveGlobalWindowsRuntimeDefaultFromLegacySettings,
@@ -2301,6 +2303,90 @@ function normalizeClaudeLivePtySessionIds(value: unknown): string[] {
   return ids.toReversed()
 }
 
+type ClaudeLivePtyBindingArgs = {
+  ptyId: string
+  claudeAccountId?: string
+  claudeSharedAccountId?: string | null
+}
+
+/** Which Claude live-PTY ownership records persistPtyBinding will write for a
+ *  launch. Exported so the launch path can tell whether the gate still has to
+ *  record ownership itself, without duplicating these bounds. */
+export function claudeLivePtyBindingWrites(args: ClaudeLivePtyBindingArgs): {
+  injected: boolean
+  shared: boolean
+} {
+  const isBoundedId = (value: string): boolean => value.length > 0 && value.length <= 512
+  if (!isBoundedId(args.ptyId)) {
+    return { injected: false, shared: false }
+  }
+  return {
+    injected: typeof args.claudeAccountId === 'string' && isBoundedId(args.claudeAccountId),
+    shared:
+      Object.hasOwn(args, 'claudeSharedAccountId') &&
+      (args.claudeSharedAccountId === null ||
+        (typeof args.claudeSharedAccountId === 'string' &&
+          isBoundedId(args.claudeSharedAccountId)))
+  }
+}
+
+function normalizeClaudeLivePtyAccountBindings(value: unknown): ClaudeLivePtyAccountBinding[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const bindings: ClaudeLivePtyAccountBinding[] = []
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    const candidate = value[index] as Partial<ClaudeLivePtyAccountBinding> | null
+    if (
+      !candidate ||
+      typeof candidate.sessionId !== 'string' ||
+      candidate.sessionId.length === 0 ||
+      candidate.sessionId.length > 512 ||
+      typeof candidate.accountId !== 'string' ||
+      candidate.accountId.length === 0 ||
+      candidate.accountId.length > 512 ||
+      bindings.some((entry) => entry.sessionId === candidate.sessionId)
+    ) {
+      continue
+    }
+    bindings.push({ sessionId: candidate.sessionId, accountId: candidate.accountId })
+    if (bindings.length >= MAX_CLAUDE_LIVE_PTY_SESSION_IDS) {
+      break
+    }
+  }
+  return bindings.toReversed()
+}
+
+function normalizeClaudeLiveSharedPtyAccountBindings(
+  value: unknown
+): ClaudeLiveSharedPtyAccountBinding[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const bindings: ClaudeLiveSharedPtyAccountBinding[] = []
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    const candidate = value[index] as Partial<ClaudeLiveSharedPtyAccountBinding> | null
+    if (
+      !candidate ||
+      typeof candidate.sessionId !== 'string' ||
+      candidate.sessionId.length === 0 ||
+      candidate.sessionId.length > 512 ||
+      (candidate.accountId !== null &&
+        (typeof candidate.accountId !== 'string' ||
+          candidate.accountId.length === 0 ||
+          candidate.accountId.length > 512)) ||
+      bindings.some((entry) => entry.sessionId === candidate.sessionId)
+    ) {
+      continue
+    }
+    bindings.push({ sessionId: candidate.sessionId, accountId: candidate.accountId ?? null })
+    if (bindings.length >= MAX_CLAUDE_LIVE_PTY_SESSION_IDS) {
+      break
+    }
+  }
+  return bindings.toReversed()
+}
+
 function normalizeMigrationUnsupportedPtyEntries(value: unknown): MigrationUnsupportedPtyEntry[] {
   if (!Array.isArray(value)) {
     return []
@@ -3657,6 +3743,12 @@ export class Store {
             .filter((lease): lease is SshRemotePtyLease => lease !== null),
           sshPtyConsumerRecoveries: parsed.sshPtyConsumerRecoveries,
           claudeLivePtySessionIds: normalizeClaudeLivePtySessionIds(parsed.claudeLivePtySessionIds),
+          claudeLiveSharedPtyAccountBindings: normalizeClaudeLiveSharedPtyAccountBindings(
+            parsed.claudeLiveSharedPtyAccountBindings
+          ),
+          claudeLivePtyAccountBindings: normalizeClaudeLivePtyAccountBindings(
+            parsed.claudeLivePtyAccountBindings
+          ),
           migrationUnsupportedPtyEntries: normalizeMigrationUnsupportedPtyEntries(
             parsed.migrationUnsupportedPtyEntries
           ),
@@ -6646,6 +6738,8 @@ export class Store {
       incarnationId?: string
       startupCwd?: string
       expectedBinding?: { ptyId: string; incarnationId?: string }
+      claudeAccountId?: string
+      claudeSharedAccountId?: string | null
     },
     hostId?: string | null
   ): boolean {
@@ -6672,6 +6766,9 @@ export class Store {
       }
     }
     const sessionBeforeBinding = cloneWorkspaceSessionState(session)
+    const claudeBindingsBefore = this.state.claudeLivePtyAccountBindings ?? []
+    const sharedClaudeIdsBefore = this.state.claudeLivePtySessionIds ?? []
+    const sharedClaudeBindingsBefore = this.state.claudeLiveSharedPtyAccountBindings ?? []
     const reconciledIncarnation =
       args.expectedBinding !== undefined &&
       args.incarnationId !== args.expectedBinding.incarnationId
@@ -6697,6 +6794,12 @@ export class Store {
           [resolvedHostId]: sessionBeforeBinding
         }
       }
+      this.state.claudeLivePtyAccountBindings = claudeBindingsBefore
+      this.state.claudeLivePtySessionIds = sharedClaudeIdsBefore
+      this.state.claudeLiveSharedPtyAccountBindings = sharedClaudeBindingsBefore
+      // Why: flushOrThrow canceled the prior debounce; unrelated pending state
+      // still needs a retry after this binding transaction rolls back.
+      this.scheduleSave()
     }
     if (args.incarnationId) {
       session.terminalPtyIncarnationsByPaneKey = {
@@ -6734,6 +6837,30 @@ export class Store {
         ...session.activeTabIdByWorktree,
         [args.worktreeId]: session.activeTabIdByWorktree?.[args.worktreeId] ?? args.tabId
       }
+    }
+    const { injected: shouldPersistClaudeBinding, shared: shouldPersistSharedClaudeBinding } =
+      claudeLivePtyBindingWrites(args)
+    if (
+      shouldPersistClaudeBinding &&
+      !claudeBindingsBefore.some(
+        (entry) => entry.sessionId === args.ptyId && entry.accountId === args.claudeAccountId
+      )
+    ) {
+      this.state.claudeLivePtyAccountBindings = [
+        ...claudeBindingsBefore.filter((entry) => entry.sessionId !== args.ptyId),
+        { sessionId: args.ptyId, accountId: args.claudeAccountId! }
+      ].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    }
+    if (shouldPersistSharedClaudeBinding) {
+      this.state.claudeLivePtySessionIds = (
+        sharedClaudeIdsBefore.includes(args.ptyId)
+          ? sharedClaudeIdsBefore
+          : [...sharedClaudeIdsBefore, args.ptyId]
+      ).slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+      this.state.claudeLiveSharedPtyAccountBindings = [
+        ...sharedClaudeBindingsBefore.filter((entry) => entry.sessionId !== args.ptyId),
+        { sessionId: args.ptyId, accountId: args.claudeSharedAccountId ?? null }
+      ].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
     }
     if (!isTerminalLeafId(args.leafId)) {
       // Why: keep legacy renderer-local pane ids out of durable leaf-keyed layout state after the UUID migration.
@@ -6795,6 +6922,7 @@ export class Store {
     return true
   }
 
+
   // ── SSH Targets ────────────────────────────────────────────────────
 
   getSshTargets(): SshTarget[] {
@@ -6848,18 +6976,64 @@ export class Store {
     return [...(this.state.claudeLivePtySessionIds ?? [])]
   }
 
-  addClaudeLivePtySessionId(sessionId: string): void {
+  getClaudeLiveSharedPtyAccountBindings(): ClaudeLiveSharedPtyAccountBinding[] {
+    return (this.state.claudeLiveSharedPtyAccountBindings ?? []).map((binding) => ({ ...binding }))
+  }
+
+  commitClaudeAccountState(
+    settingsUpdates: Partial<GlobalSettings>,
+    worktreeAccountIds: Readonly<Record<string, string | null>>
+  ): void {
+    const previousSettings = this.state.settings
+    const previousWorktreeMeta = { ...this.state.worktreeMeta }
+    try {
+      this.updateSettings(settingsUpdates)
+      for (const [worktreeId, claudeAccountId] of Object.entries(worktreeAccountIds)) {
+        this.setWorktreeMeta(worktreeId, { claudeAccountId })
+      }
+      // Why: account deletion and its pin cleanup form one crash boundary;
+      // neither may resurrect independently after credentials are removed.
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.settings = previousSettings
+      this.state.worktreeMeta = previousWorktreeMeta
+      this.scheduleSave()
+      throw error
+    }
+  }
+
+  addClaudeLivePtySessionId(sessionId: string, accountId: string | null = null): void {
     if (sessionId.length === 0 || sessionId.length > 512) {
       return
     }
     const ids = this.state.claudeLivePtySessionIds ?? []
-    if (ids.includes(sessionId)) {
+    const currentBindings = this.state.claudeLiveSharedPtyAccountBindings ?? []
+    const existingBinding = currentBindings.find((binding) => binding.sessionId === sessionId)
+    if (
+      ids.includes(sessionId) &&
+      existingBinding &&
+      (existingBinding.accountId === accountId || accountId === null)
+    ) {
       return
     }
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
-    this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
-    // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
-    this.flush()
+    this.state.claudeLivePtySessionIds = [...ids.filter((id) => id !== sessionId), sessionId].slice(
+      -MAX_CLAUDE_LIVE_PTY_SESSION_IDS
+    )
+    this.state.claudeLiveSharedPtyAccountBindings = [
+      ...currentBindings.filter((binding) => binding.sessionId !== sessionId),
+      { sessionId, accountId }
+    ].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    try {
+      // Why: a force-quit right after spawn must retain both shared mode and
+      // account identity before another launch can fork its refresh chain.
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.claudeLivePtySessionIds = ids
+      this.state.claudeLiveSharedPtyAccountBindings = currentBindings
+      this.scheduleSave()
+      throw error
+    }
   }
 
   removeClaudeLivePtySessionId(sessionId: string): void {
@@ -6868,6 +7042,58 @@ export class Store {
       return
     }
     this.state.claudeLivePtySessionIds = ids.filter((id) => id !== sessionId)
+    this.state.claudeLiveSharedPtyAccountBindings = (
+      this.state.claudeLiveSharedPtyAccountBindings ?? []
+    ).filter((binding) => binding.sessionId !== sessionId)
+    this.scheduleSave()
+  }
+
+  getClaudeLivePtyAccountBindings(): ClaudeLivePtyAccountBinding[] {
+    return (this.state.claudeLivePtyAccountBindings ?? []).map((binding) => ({ ...binding }))
+  }
+
+  addClaudeLivePtyAccountBinding(sessionId: string, accountId: string): void {
+    if (
+      sessionId.length === 0 ||
+      sessionId.length > 512 ||
+      accountId.length === 0 ||
+      accountId.length > 512
+    ) {
+      throw new Error('Invalid live Claude PTY account binding.')
+    }
+    const currentBindings = this.state.claudeLivePtyAccountBindings ?? []
+    if (
+      currentBindings.some(
+        (entry) => entry.sessionId === sessionId && entry.accountId === accountId
+      )
+    ) {
+      return
+    }
+    const bindings = currentBindings.filter((entry) => entry.sessionId !== sessionId)
+    this.state.claudeLivePtyAccountBindings = [...bindings, { sessionId, accountId }].slice(
+      -MAX_CLAUDE_LIVE_PTY_SESSION_IDS
+    )
+    // Why: a daemon CLI can outlive a force-quit, so its account ownership must
+    // reach disk before spawn returns and any later global switch can occur.
+    try {
+      this.flushOrThrow()
+    } catch (error) {
+      this.state.claudeLivePtyAccountBindings = currentBindings
+      // Why: flushOrThrow cancels the prior debounce before writing. Re-arm it
+      // so unrelated state that was pending before this failed binding retries.
+      this.scheduleSave()
+      throw error
+    }
+  }
+
+  removeClaudeLivePtyAccountBinding(sessionId: string): void {
+    const bindings = this.state.claudeLivePtyAccountBindings ?? []
+    if (!bindings.some((entry) => entry.sessionId === sessionId)) {
+      return
+    }
+    this.state.claudeLivePtyAccountBindings = bindings.filter(
+      (entry) => entry.sessionId !== sessionId
+    )
     this.scheduleSave()
   }
 

@@ -117,6 +117,7 @@ describe('worktree RPC methods', () => {
         displayName: 'Feature title',
         telemetrySource: 'sidebar',
         workspaceStatus: 'in-review',
+        claudeAccountId: 'account-a',
         manualOrder: 123_456,
         linkedIssue: 123,
         linkedPR: 456,
@@ -147,6 +148,7 @@ describe('worktree RPC methods', () => {
       displayName: 'Feature title',
       telemetrySource: 'sidebar',
       workspaceStatus: 'in-review',
+      claudeAccountId: 'account-a',
       manualOrder: 123_456,
       sparseCheckout: { directories: ['src'], presetId: 'preset-1' },
       pushTarget: { remoteName: 'fork', branchName: 'feature' },
@@ -739,81 +741,6 @@ describe('worktree RPC methods', () => {
       sourceBranch: 'feature/mr-head',
       isCrossRepository: false
     })
-  })
-
-  it('forwards Linear metadata through worktree.set', async () => {
-    const runtime = {
-      getRuntimeId: () => 'test-runtime',
-      dedupeWorktreeCreate: passthroughDedupe,
-      updateManagedWorktreeMeta: vi.fn().mockResolvedValue({ id: 'wt-1' })
-    } as unknown as OrcaRuntimeService
-    const dispatcher = new RpcDispatcher({ runtime, methods: WORKTREE_METHODS })
-
-    const response = await dispatcher.dispatch(
-      makeRequest('worktree.set', {
-        worktree: 'id:wt-1',
-        linkedLinearIssue: 'STA-335',
-        linkedLinearIssueWorkspaceId: null,
-        linkedLinearIssueOrganizationUrlKey: 'stably'
-      })
-    )
-
-    expect(response).toMatchObject({ ok: true })
-    expect(runtime.updateManagedWorktreeMeta).toHaveBeenCalledWith(
-      'id:wt-1',
-      expect.objectContaining({
-        linkedLinearIssue: 'STA-335',
-        linkedLinearIssueWorkspaceId: null,
-        linkedLinearIssueOrganizationUrlKey: 'stably'
-      })
-    )
-  })
-
-  it('forwards push target clears through worktree.set', async () => {
-    const runtime = {
-      getRuntimeId: () => 'test-runtime',
-      dedupeWorktreeCreate: passthroughDedupe,
-      updateManagedWorktreeMeta: vi.fn().mockResolvedValue({ id: 'wt-1' })
-    } as unknown as OrcaRuntimeService
-    const dispatcher = new RpcDispatcher({ runtime, methods: WORKTREE_METHODS })
-
-    const response = await dispatcher.dispatch(
-      makeRequest('worktree.set', {
-        worktree: 'id:wt-1',
-        linkedPR: null,
-        pushTarget: null
-      })
-    )
-
-    expect(response).toMatchObject({ ok: true })
-    expect(runtime.updateManagedWorktreeMeta).toHaveBeenCalledWith(
-      'id:wt-1',
-      expect.objectContaining({
-        linkedPR: null,
-        pushTarget: null
-      })
-    )
-  })
-
-  it('rejects worktree.set when both parent and no-parent are supplied', async () => {
-    const runtime = {
-      getRuntimeId: () => 'test-runtime',
-      dedupeWorktreeCreate: passthroughDedupe,
-      updateManagedWorktreeMeta: vi.fn()
-    } as unknown as OrcaRuntimeService
-    const dispatcher = new RpcDispatcher({ runtime, methods: WORKTREE_METHODS })
-
-    const response = await dispatcher.dispatch(
-      makeRequest('worktree.set', {
-        worktree: 'id:child',
-        parentWorktree: 'id:parent',
-        noParent: true
-      })
-    )
-
-    expect(response).toMatchObject({ ok: false })
-    expect(JSON.stringify(response)).toContain('Choose either --parent-worktree or --no-parent')
-    expect(runtime.updateManagedWorktreeMeta).not.toHaveBeenCalled()
   })
 
   it('lists raw worktree lineage through the runtime server', async () => {

@@ -209,7 +209,10 @@ import {
   normalizeCodexRuntimeSelection,
   type CodexAccountSelectionTarget
 } from './codex-accounts/runtime-selection'
-import { normalizeClaudeRuntimeSelection } from './claude-accounts/runtime-selection'
+import {
+  getSelectedClaudeAccountIdForTarget,
+  normalizeClaudeRuntimeSelection
+} from './claude-accounts/runtime-selection'
 import { codexHookService, setSystemCodexHomeHookSweepSuppressed } from './codex/hook-service'
 import {
   ensureRealHomeCodexHookState,
@@ -229,11 +232,13 @@ import type { AgentProviderSessionMetadata } from '../shared/agent-session-resum
 import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
 import { ClaudeAccountService } from './claude-accounts/service'
+import { notifyWorktreesChanged } from './ipc/worktree-remote'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
 import {
   attachClaudeLivePtyPersistence,
   onLiveClaudePtysDrained,
-  seedLiveClaudePtysFromPersistence
+  seedLiveClaudePtysFromPersistence,
+  seedLiveInjectedClaudePtysFromPersistence
 } from './claude-accounts/live-pty-gate'
 import { StarNagService } from './star-nag/service'
 import { agentHookServer, type AgentHookProviderSessionIdentity } from './agent-hooks/server'
@@ -1368,7 +1373,7 @@ function openMainWindow(): BrowserWindow {
     store,
     runtime,
     prepareCodexRuntimeHomeForLaunch,
-    (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+    (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target, { reservePtyAccount: true }),
     {
       prepareCodexSessionResume: prepareCodexSessionResumeForLaunch,
       awaitLocalPtyStartup: () => localPtyStartupReady,
@@ -1385,7 +1390,8 @@ function openMainWindow(): BrowserWindow {
         preserveAgentAuthBeforeRestart({ codexRuntimeHome, claudeRuntimeAuth, store }),
       updateInstallMode: resolveUpdateInstallMode(isServeMode),
       onWorktreeLifecycle: emitPluginWorktreeLifecycle
-    }
+    },
+    (target) => claudeRuntimeAuth!.hasInjectedAccountOverride(target)
   )
   // Why: attach the durable renderer pull now, but launch the diagnostic process after first paint.
   initTccPromptNotice(window, { deferWatchUntilReadyToShow: true })
@@ -2095,10 +2101,13 @@ void app.whenReady().then(async () => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
   const persistedClaudePtyIds = store.getClaudeLivePtySessionIds()
-  seedLiveClaudePtysFromPersistence(persistedClaudePtyIds)
-  if (persistedClaudePtyIds.length > 0) {
+  const persistedSharedClaudePtys = store.getClaudeLiveSharedPtyAccountBindings()
+  seedLiveClaudePtysFromPersistence(persistedClaudePtyIds, persistedSharedClaudePtys)
+  const persistedInjectedClaudePtys = store.getClaudeLivePtyAccountBindings()
+  seedLiveInjectedClaudePtysFromPersistence(persistedInjectedClaudePtys)
+  if (persistedClaudePtyIds.length > 0 || persistedInjectedClaudePtys.length > 0) {
     console.log(
-      `[claude-live-pty] Seeded ${persistedClaudePtyIds.length} persisted Claude session id(s) into the refresh gate`
+      `[claude-live-pty] Seeded ${persistedClaudePtyIds.length} shared and ${persistedInjectedClaudePtys.length} injected Claude session id(s) into the refresh gate`
     )
   }
   applyAppIcon(store.getSettings().appIcon)
@@ -2251,7 +2260,6 @@ void app.whenReady().then(async () => {
   // sessions tree walk.
   codexSessionMigration.scheduleInitialRun()
   claudeRuntimeAuth = new ClaudeRuntimeAuthService(store)
-  claudeAccounts = new ClaudeAccountService(store, rateLimits, claudeRuntimeAuth)
   rateLimits.setCodexHomePathResolver((target) =>
     codexRuntimeHome!.prepareForRateLimitFetch(target)
   )
@@ -2269,6 +2277,9 @@ void app.whenReady().then(async () => {
   })
   rateLimits.setClaudeAuthPreparationResolver((target) =>
     claudeRuntimeAuth!.prepareForRateLimitFetch(target)
+  )
+  rateLimits.setClaudeAccountIdResolver((target) =>
+    getSelectedClaudeAccountIdForTarget(store!.getSettings(), target)
   )
   // Why: live Claude sessions stream usage windows through their statusLine command; feeding them here avoids OAuth usage-endpoint polling (and its 429s).
   agentHookServer.setClaudeStatusLineListener((event) => {
@@ -2402,6 +2413,12 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  claudeAccounts = new ClaudeAccountService(store, rateLimits, claudeRuntimeAuth, (repoId) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      notifyWorktreesChanged(mainWindow, repoId)
+    }
+    runtimeService.notifyWorktreesChangedForRemoteClients(repoId)
+  })
   runtimeService.prepareLegacyWorkerTerminalRecovery()
   publishProviderSessionChanges(agentHookServer.getProviderSessionIdentities())
   browserManager.setBrowserGuestStateChangedListener((worktreeId) => {
@@ -2861,9 +2878,10 @@ void app.whenReady().then(async () => {
       runtime,
       prepareCodexRuntimeHomeForLaunch,
       () => store!.getSettings(),
-      (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+      (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target, { reservePtyAccount: true }),
       store,
-      prepareCodexSessionResumeForLaunch
+      prepareCodexSessionResumeForLaunch,
+      (target) => claudeRuntimeAuth!.hasInjectedAccountOverride(target)
     )
     await runtime.refreshRestoredOrchestrationAuthority()
     await runtime.reconcileLegacyWorkerTerminals()

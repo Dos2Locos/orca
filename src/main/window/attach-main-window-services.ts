@@ -101,7 +101,11 @@ export function attachMainWindowServices(
     onBeforeUpdateQuit?: () => void | Promise<void>
     updateInstallMode?: UpdateInstallMode
     onWorktreeLifecycle?: (event: RuntimeWorktreeLifecycleEvent) => void
-  }
+  },
+  // Why: synchronous companion to prepareClaudeAuth — exempts per-worktree-
+  // pinned (injected) Claude launches from the global account-switch block,
+  // since they never touch the shared ~/.claude runtime that block protects.
+  isInjectedClaudeAccountTarget?: (target?: ClaudeAccountSelectionTarget) => boolean
 ): void {
   registerAppReloadHandler(mainWindow, options?.onBeforeRendererReload)
   registerRepoHandlers(mainWindow, store)
@@ -126,7 +130,8 @@ export function attachMainWindowServices(
       awaitLocalPtyStartup: options?.awaitLocalPtyStartup,
       awaitLocalPtyProviderStartup: options?.awaitLocalPtyProviderStartup,
       isRecoveryReloadInFlight: options?.isRecoveryReloadInFlight
-    }
+    },
+    isInjectedClaudeAccountTarget
   )
   // Why: register after registerPtyHandlers so pty:management:* IPC re-installs on macOS re-activation (docs/daemon-staleness-ux.md §Phase 1).
   registerDaemonManagementHandlers()

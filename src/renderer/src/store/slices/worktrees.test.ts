@@ -17,7 +17,10 @@ import {
   createCompatibleRuntimeStatusResponseIfNeeded,
   type RuntimeEnvironmentCallRequest
 } from '../../runtime/runtime-compatibility-test-fixture'
-import { clearRuntimeCompatibilityCacheForTests } from '../../runtime/runtime-rpc-client'
+import {
+  clearRuntimeCompatibilityCacheForTests,
+  RuntimeRpcCallError
+} from '../../runtime/runtime-rpc-client'
 import { LOCAL_EXECUTION_HOST_ID } from '../../../../shared/execution-host'
 import type {
   ForgetRemovedWorktreesForExecutionHostArgs,
@@ -135,6 +138,7 @@ const mockApi = {
     resolvePrBase: vi.fn(),
     resolveMrBase: vi.fn(),
     updateMeta: vi.fn().mockResolvedValue(undefined),
+    updateMetaBatch: vi.fn().mockResolvedValue(undefined),
     updateLineage: vi.fn().mockResolvedValue(null)
   },
   pty: {
@@ -7368,26 +7372,30 @@ describe('worktree remote runtime mutations', () => {
   it.each([
     [
       'updateWorktreeMeta',
+      'updateMeta' as const,
       (store: ReturnType<typeof createTestStore>, worktreeId: string) =>
         store.getState().updateWorktreeMeta(worktreeId, { isUnread: true })
     ],
     [
+      // Multi-row local writes go through the batch IPC, not one call per row.
       'updateWorktreesMeta',
+      'updateMetaBatch' as const,
       (store: ReturnType<typeof createTestStore>, worktreeId: string) =>
         store.getState().updateWorktreesMeta(new Map([[worktreeId, { isUnread: true }]]))
     ],
     [
       'markWorktreeUnread',
+      'updateMeta' as const,
       async (store: ReturnType<typeof createTestStore>, worktreeId: string) => {
         store.getState().markWorktreeUnread(worktreeId)
         await new Promise((resolve) => setTimeout(resolve, 0))
       }
     ]
-  ])('swallows a transport-wrapped selector miss in %s', async (_name, run) => {
+  ])('swallows a transport-wrapped selector miss in %s', async (_name, apiMethod, run) => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const store = createTestStore()
     const wt = makeWorktree({ id: 'repo1::/path/wt1', repoId: 'repo1', path: '/path/wt1' })
-    mockApi.worktrees.updateMeta.mockRejectedValue(
+    mockApi.worktrees[apiMethod].mockRejectedValue(
       new Error("Error invoking remote method 'worktrees:updateMeta': Error: selector_not_found")
     )
     store.setState({ worktreesByRepo: { repo1: [wt] } } as Partial<AppState>)
@@ -7396,11 +7404,12 @@ describe('worktree remote runtime mutations', () => {
       await run(store, wt.id)
       await new Promise((resolve) => setTimeout(resolve, 0))
 
-      expect(mockApi.worktrees.updateMeta).toHaveBeenCalled()
+      expect(mockApi.worktrees[apiMethod]).toHaveBeenCalled()
       expect(errorSpy).not.toHaveBeenCalled()
     } finally {
       errorSpy.mockRestore()
       mockApi.worktrees.updateMeta.mockReset().mockResolvedValue({})
+      mockApi.worktrees.updateMetaBatch.mockReset().mockResolvedValue(undefined)
     }
   })
 
@@ -7757,7 +7766,196 @@ describe('worktree remote runtime mutations', () => {
     ])
     expect(store.getState().sortEpoch).toBe(8)
     expect(subscriber).toHaveBeenCalledTimes(1)
-    expect(mockApi.worktrees.updateMeta).toHaveBeenCalledTimes(2)
+    expect(mockApi.worktrees.updateMetaBatch).toHaveBeenCalledTimes(1)
+    expect(mockApi.worktrees.updateMetaBatch).toHaveBeenCalledWith({
+      updates: [
+        { worktreeId: first.id, updates: { workspaceStatus: 'in-review' } },
+        { worktreeId: second.id, updates: { workspaceStatus: 'completed' } }
+      ]
+    })
+  })
+
+  it('sends 100 runtime-owned metadata updates in one host RPC', async () => {
+    const store = createTestStore()
+    const worktrees = Array.from({ length: 100 }, (_, index) =>
+      makeWorktree({
+        id: `repo1::/remote/wt-${index}`,
+        repoId: 'repo1',
+        path: `/remote/wt-${index}`,
+        hostId: 'runtime:env-1'
+      })
+    )
+    runtimeEnvironmentCall.mockResolvedValue({
+      id: 'batch-result',
+      ok: true,
+      result: { updated: 100 },
+      _meta: { runtimeId: 'runtime-1' }
+    })
+    store.setState({ worktreesByRepo: { repo1: worktrees } } as Partial<AppState>)
+
+    await store
+      .getState()
+      .updateWorktreesMeta(
+        new Map(worktrees.map((worktree) => [worktree.id, { claudeAccountId: 'account-a' }]))
+      )
+
+    expect(runtimeEnvironmentCall).toHaveBeenCalledTimes(1)
+    expect(runtimeEnvironmentCall).toHaveBeenCalledWith({
+      selector: 'env-1',
+      method: 'worktree.setBatch',
+      params: {
+        updates: worktrees.map((worktree) => ({
+          worktree: `id:${worktree.id}`,
+          claudeAccountId: 'account-a'
+        }))
+      },
+      timeoutMs: 15_000
+    })
+  })
+
+  it('falls back to per-row metadata updates for an older runtime host', async () => {
+    const store = createTestStore()
+    const first = makeWorktree({
+      id: 'repo1::/remote/wt-1',
+      repoId: 'repo1',
+      hostId: 'runtime:env-1'
+    })
+    const second = makeWorktree({
+      id: 'repo1::/remote/wt-2',
+      repoId: 'repo1',
+      hostId: 'runtime:env-1'
+    })
+    runtimeEnvironmentCall.mockImplementation(({ method }) => {
+      if (method === 'worktree.setBatch') {
+        throw new RuntimeRpcCallError({
+          id: 'batch-failure',
+          ok: false,
+          error: { code: 'method_not_found', message: 'Unknown method' },
+          _meta: { runtimeId: 'runtime-1' }
+        })
+      }
+      return Promise.resolve({
+        id: `result-${method}`,
+        ok: true,
+        result: { worktree: {} },
+        _meta: { runtimeId: 'runtime-1' }
+      })
+    })
+    store.setState({ worktreesByRepo: { repo1: [first, second] } } as Partial<AppState>)
+
+    await store.getState().updateWorktreesMeta(
+      new Map([
+        [first.id, { workspaceStatus: 'in-review' }],
+        [second.id, { workspaceStatus: 'completed' }]
+      ])
+    )
+
+    expect(runtimeEnvironmentCall.mock.calls.map(([request]) => request.method)).toEqual([
+      'worktree.setBatch',
+      'worktree.set',
+      'worktree.set'
+    ])
+    expect(runtimeEnvironmentCall.mock.calls.slice(1).map(([request]) => request.params)).toEqual([
+      { worktree: `id:${first.id}`, workspaceStatus: 'in-review' },
+      { worktree: `id:${second.id}`, workspaceStatus: 'completed' }
+    ])
+  })
+
+  it('does not send Claude account pins through a legacy runtime schema', async () => {
+    const store = createTestStore()
+    const worktree = makeWorktree({
+      id: 'repo1::/remote/wt-1',
+      repoId: 'repo1',
+      hostId: 'runtime:env-1'
+    })
+    const fetchWorktrees = vi.fn().mockResolvedValue(undefined)
+    runtimeEnvironmentCall.mockRejectedValue(
+      new RuntimeRpcCallError({
+        id: 'batch-failure',
+        ok: false,
+        error: { code: 'method_not_found', message: 'Unknown method' },
+        _meta: { runtimeId: 'runtime-1' }
+      })
+    )
+    store.setState({
+      worktreesByRepo: { repo1: [worktree] },
+      fetchWorktrees
+    } as Partial<AppState>)
+
+    await store
+      .getState()
+      .updateWorktreesMeta(new Map([[worktree.id, { claudeAccountId: 'account-a' }]]))
+
+    expect(runtimeEnvironmentCall).toHaveBeenCalledTimes(1)
+    expect(fetchWorktrees).toHaveBeenCalledWith('repo1', {
+      executionHostId: 'runtime:env-1'
+    })
+  })
+
+  it('refreshes each repo once when a runtime metadata batch fails', async () => {
+    const store = createTestStore()
+    const worktrees = Array.from({ length: 100 }, (_, index) =>
+      makeWorktree({
+        id: `repo1::/remote/wt-${index}`,
+        repoId: 'repo1',
+        path: `/remote/wt-${index}`,
+        hostId: 'runtime:env-1'
+      })
+    )
+    const fetchWorktrees = vi.fn().mockResolvedValue(undefined)
+    runtimeEnvironmentCall.mockRejectedValue(new Error('offline'))
+    store.setState({
+      worktreesByRepo: { repo1: worktrees },
+      fetchWorktrees
+    } as Partial<AppState>)
+
+    await store
+      .getState()
+      .updateWorktreesMeta(
+        new Map(worktrees.map((worktree) => [worktree.id, { claudeAccountId: null }]))
+      )
+
+    expect(runtimeEnvironmentCall).toHaveBeenCalledTimes(1)
+    expect(fetchWorktrees).toHaveBeenCalledTimes(1)
+    expect(fetchWorktrees).toHaveBeenCalledWith('repo1', {
+      executionHostId: 'runtime:env-1'
+    })
+  })
+
+  it('repairs failed batches against each owning runtime environment', async () => {
+    const store = createTestStore()
+    const first = makeWorktree({
+      id: 'repo1::/remote/env-1',
+      repoId: 'repo1',
+      hostId: 'runtime:env-1'
+    })
+    const second = makeWorktree({
+      id: 'repo1::/remote/env-2',
+      repoId: 'repo1',
+      hostId: 'runtime:env-2'
+    })
+    const fetchWorktrees = vi.fn().mockResolvedValue(undefined)
+    runtimeEnvironmentCall.mockRejectedValue(new Error('offline'))
+    store.setState({
+      worktreesByRepo: { repo1: [first, second] },
+      fetchWorktrees
+    } as Partial<AppState>)
+
+    await store.getState().updateWorktreesMeta(
+      new Map([
+        [first.id, { claudeAccountId: null }],
+        [second.id, { claudeAccountId: null }]
+      ])
+    )
+
+    expect(runtimeEnvironmentCall).toHaveBeenCalledTimes(2)
+    expect(fetchWorktrees).toHaveBeenCalledTimes(2)
+    expect(fetchWorktrees).toHaveBeenCalledWith('repo1', {
+      executionHostId: 'runtime:env-1'
+    })
+    expect(fetchWorktrees).toHaveBeenCalledWith('repo1', {
+      executionHostId: 'runtime:env-2'
+    })
   })
 })
 

@@ -84,6 +84,7 @@ import {
   resolveQuickCreateLinkedWorkItemPrompt
 } from '@/lib/linked-work-item-context'
 import { getLocalRepoProjectExecutionRuntimeContext } from '@/lib/local-preflight-context'
+import type { ClaudeAccountLaunchRuntime } from '@/lib/claude-account-runtime-filter'
 import { captureDirectSshMutationExpectation } from '@/lib/ssh-mutation-expectation'
 import {
   buildLinearIssueLinkedWorkItem,
@@ -266,6 +267,7 @@ export type UseComposerStateOptions = {
 export type ComposerCardProps = {
   eligibleRepos: ReturnType<typeof useAppStore.getState>['repos']
   repoId: string
+  selectedRepoClaudeAccountRuntime?: ClaudeAccountLaunchRuntime
   projectOptions: NewWorkspaceProjectOption[]
   selectedProjectId: string | null
   selectedRepoIsGit: boolean
@@ -398,7 +400,9 @@ export type UseComposerStateResult = {
   promptTextareaRef: React.RefObject<HTMLTextAreaElement | null>
   nameInputRef: React.RefObject<HTMLInputElement | null>
   submit: () => Promise<void>
-  submitQuick: (agent: TuiAgent | null) => Promise<void>
+  /** `claudeAccountId` pins the new worktree to a managed Claude account.
+   *  Omitted/null = inherit the global host selection. */
+  submitQuick: (agent: TuiAgent | null, claudeAccountId?: string | null) => Promise<void>
   /** Invoked by the Enter handler to re-check whether submission should fire. */
   createDisabled: boolean
   /** Selects the repo a nested Add Project flow just added, clearing any folder-group target so the composer lands on it. */
@@ -857,26 +861,30 @@ export function useComposerState(options: UseComposerStateOptions): UseComposerS
   const selectedRepoHookContextKey = selectedRepo
     ? JSON.stringify([selectedRepoExecutionHostId ?? 'local', repoId])
     : null
+  const selectedRepoProjectRuntime = useMemo(
+    () =>
+      !selectedRepo || selectedRepo.connectionId
+        ? undefined
+        : getLocalRepoProjectExecutionRuntimeContext(
+            {
+              activeRepoId,
+              activeWorktreeId: null,
+              projects,
+              repos,
+              settings,
+              worktreesByRepo
+            },
+            selectedRepo.id,
+            CLIENT_PLATFORM
+          ),
+    [activeRepoId, projects, repos, selectedRepo, settings, worktreesByRepo]
+  )
   const selectedRepoAgentLaunchPlatform = useMemo(() => {
     if (!selectedRepo) {
       return CLIENT_PLATFORM
     }
-    const projectRuntime = selectedRepo.connectionId
-      ? undefined
-      : getLocalRepoProjectExecutionRuntimeContext(
-          {
-            activeRepoId,
-            activeWorktreeId: null,
-            projects,
-            repos,
-            settings,
-            worktreesByRepo
-          },
-          selectedRepo.id,
-          CLIENT_PLATFORM
-        )
-    return getAgentLaunchPlatformForRepo(selectedRepo, projectRuntime)
-  }, [activeRepoId, projects, repos, selectedRepo, settings, worktreesByRepo])
+    return getAgentLaunchPlatformForRepo(selectedRepo, selectedRepoProjectRuntime)
+  }, [selectedRepo, selectedRepoProjectRuntime])
   // Why: SSH remotes deploy the CLI shim as plain `orca`, so the Linux-only `orca-ide` rename must not apply to remote launch commands.
   const selectedRepoIsRemote = selectedRepo ? repoIsRemote(selectedRepo) : false
   const selectedRepoStartupShell = resolveLocalWindowsAgentStartupShell({
@@ -4022,8 +4030,11 @@ export function useComposerState(options: UseComposerStateOptions): UseComposerS
   }, [])
 
   const submitQuick = useCallback(
-    async (requestedAgent: TuiAgent | null): Promise<void> => {
+    async (requestedAgent: TuiAgent | null, claudeAccountId?: string | null): Promise<void> => {
       if (isProjectGroupTarget) {
+        // Why: folder workspaces don't yet resolve a single worktree runtime
+        // to pin an account to, so a per-worktree Claude account choice (if
+        // any) is intentionally dropped here rather than silently mis-applied.
         await submitFolderTarget(requestedAgent)
         return
       }
@@ -4473,6 +4484,7 @@ export function useComposerState(options: UseComposerStateOptions): UseComposerS
           ...(resolvedInitialWorkspaceStatus
             ? { workspaceStatus: resolvedInitialWorkspaceStatus }
             : {}),
+          ...(claudeAccountId ? { claudeAccountId } : {}),
           ...(smartGitHubResolution.kind === 'none' && linkedGitLabMR != null
             ? { linkedGitLabMR }
             : {}),
@@ -4601,6 +4613,14 @@ export function useComposerState(options: UseComposerStateOptions): UseComposerS
   const cardProps: ComposerCardProps = {
     eligibleRepos: isProjectGroupTarget ? folderSourceRepos : eligibleRepos,
     repoId,
+    selectedRepoClaudeAccountRuntime:
+      selectedRepoProjectRuntime?.status === 'repair-required'
+        ? { kind: 'unavailable' }
+        : selectedRepoProjectRuntime?.runtime.kind === 'wsl'
+          ? { kind: 'wsl', distro: selectedRepoProjectRuntime.runtime.distro }
+          : selectedRepoProjectRuntime
+            ? { kind: 'host' }
+            : undefined,
     projectOptions,
     selectedProjectId,
     selectedRepoIsGit: isProjectGroupTarget ? true : selectedRepoIsGit,
