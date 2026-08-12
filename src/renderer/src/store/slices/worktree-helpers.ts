@@ -203,6 +203,8 @@ export type WorktreeSlice = {
       /** Claude managed account to pin the new worktree to. Omitted/null =
        *  inherit the global host selection. */
       claudeAccountId?: CreateWorktreeArgs['claudeAccountId']
+      /** Lets the owning runtime launch and prefill a task agent without first creating an idle shell. */
+      startupDraft?: string
     }
   ) => Promise<CreateWorktreeResult>
   /** Register an in-flight background creation and make it the active surface. */
